@@ -88,12 +88,42 @@ class Command(BaseCommand):
                 obj.supported_parts.add(part_objs[p])
 
         # 6. Defect Reasons
+        CASTING_DEFECT_SUBCATEGORIES = [
+            'Drag',
+            'Crack',
+            'Leaker',
+            'Warmup',
+            'Hand. Damage',
+            'Trim Damage',
+            'Robot Damage',
+            'Misrun',
+            'Gate Break',
+            'Broken Biscuit',
+            'Short Biscuit',
+            'Blister',
+            'Porosity',
+            'Chipping',
+            'Distortion',
+            'Soldering',
+            'Laser issues',
+            'Stain',
+            "Broken C' Pin",
+            'Dropped in PIT',
+            'Test / QA',
+        ]
+
+        DefectReason.objects.filter(category='Casting Defect').delete()
+
         defect_data = [
-            {'category': 'Casting Defect', 'subcategory': 'Porosity', 'specific_reason': 'Surface Porosity', 'machine_types': ['casting']},
-            {'category': 'Casting Defect', 'subcategory': 'Porosity', 'specific_reason': 'Internal Porosity', 'machine_types': ['casting']},
-            {'category': 'Casting Defect', 'subcategory': 'Surface Defect', 'specific_reason': 'Cold Shut', 'machine_types': ['casting']},
-            {'category': 'Casting Defect', 'subcategory': 'Surface Defect', 'specific_reason': 'Flash', 'machine_types': ['casting']},
-            {'category': 'Casting Defect', 'subcategory': 'Dimensional', 'specific_reason': 'Warpage', 'machine_types': ['casting']},
+            *[
+                {
+                    'category': 'Casting Defect',
+                    'subcategory': name,
+                    'specific_reason': '',
+                    'machine_types': ['casting'],
+                }
+                for name in CASTING_DEFECT_SUBCATEGORIES
+            ],
             {'category': 'Machining Defect', 'subcategory': 'Tool Related', 'specific_reason': 'Tool Breakage Mark', 'machine_types': ['machining']},
             {'category': 'Machining Defect', 'subcategory': 'Tool Related', 'specific_reason': 'Worn Cutting Tool', 'machine_types': ['machining']},
             {'category': 'Machining Defect', 'subcategory': 'Surface Finish', 'specific_reason': 'Rough Surface', 'machine_types': ['machining']},
@@ -101,9 +131,11 @@ class Command(BaseCommand):
             {'category': 'Material Defect', 'subcategory': 'Raw Material', 'specific_reason': 'Material Contamination', 'machine_types': []},
         ]
         for d in defect_data:
-            DefectReason.objects.get_or_create(
-                category=d['category'], subcategory=d['subcategory'], specific_reason=d['specific_reason'],
-                defaults={'machine_types': d['machine_types']}
+            DefectReason.objects.update_or_create(
+                category=d['category'],
+                subcategory=d['subcategory'],
+                specific_reason=d.get('specific_reason', ''),
+                defaults={'machine_types': d['machine_types']},
             )
 
         # 7. Downtime Reasons (simplified hierarchical setup)

@@ -45,14 +45,16 @@ class Machine(models.Model):
 class DefectReason(models.Model):
     category = models.CharField(max_length=100)
     subcategory = models.CharField(max_length=100)
-    specific_reason = models.CharField(max_length=200)
+    specific_reason = models.CharField(max_length=200, blank=True, default='')
     machine_types = models.JSONField(blank=True, default=list)
     machine_ids = models.JSONField(blank=True, default=list)
     part_ids = models.JSONField(blank=True, default=list)
     active = models.BooleanField(default=True)
 
     def __str__(self):
-        return f"{self.category} - {self.specific_reason}"
+        if self.specific_reason:
+            return f"{self.category} - {self.specific_reason}"
+        return f"{self.category} - {self.subcategory}"
 
 class DowntimeReasonItem(models.Model):
     level = models.IntegerField()

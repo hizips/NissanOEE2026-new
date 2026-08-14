@@ -32,6 +32,8 @@ class MachineSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class DefectReasonSerializer(serializers.ModelSerializer):
+    specific_reason = serializers.CharField(required=False, allow_blank=True, default='')
+
     class Meta:
         model = DefectReason
         fields = '__all__'
