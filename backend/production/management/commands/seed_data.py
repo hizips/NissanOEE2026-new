@@ -1,8 +1,8 @@
 from django.core.management.base import BaseCommand
 from django.contrib.auth.models import User
 from production.models import (
-    Operator, Die, Part, Machine, DefectReason, 
-    DowntimeReasonItem, ProcessReason
+    Operator, Die, Part, Machine, DefectReason,
+    DowntimeReasonItem, ProcessReason, ProductionRecord, PartProductionHistory,
 )
 
 class Command(BaseCommand):
@@ -22,19 +22,14 @@ class Command(BaseCommand):
             User.objects.create_superuser(username='admin', email='admin@example.com', password='admin')
             self.stdout.write('Created manager user (username: admin, password: admin)')
 
-        # 2. Operators
-        operators_data = [
-            {'name': 'John Smith', 'employee_id': 'EMP001', 'role': 'Senior Operator'},
-            {'name': 'Maria Garcia', 'employee_id': 'EMP002', 'role': 'Operator'},
-            {'name': 'David Chen', 'employee_id': 'EMP003', 'role': 'Operator'},
-            {'name': 'Sarah Johnson', 'employee_id': 'EMP004', 'role': 'Senior Operator'},
-            {'name': 'Michael Brown', 'employee_id': 'EMP005', 'role': 'Operator'},
-            {'name': 'Emily Davis', 'employee_id': 'EMP006', 'role': 'Operator'},
-            {'name': 'Robert Wilson', 'employee_id': 'EMP007', 'role': 'Lead Operator'},
-            {'name': 'Jennifer Lee', 'employee_id': 'EMP008', 'role': 'Operator'},
-        ]
-        for op in operators_data:
-            Operator.objects.get_or_create(employee_id=op['employee_id'], defaults=op)
+        # 2. Operators (single placeholder operator)
+        ProductionRecord.objects.all().delete()
+        PartProductionHistory.objects.all().delete()
+        Operator.objects.all().delete()
+        Operator.objects.get_or_create(
+            employee_id='unknown',
+            defaults={'name': 'unknown', 'role': 'Operator', 'active': True},
+        )
         
         # 3. Dies
         dies_data = [

@@ -46,3 +46,23 @@ allows `http://localhost:5173`.
   `.venv/bin/python manage.py migrate` then `.venv/bin/python manage.py seed_data`.
 - `backend/db.sqlite3` is committed and tracked — avoid committing local data
   changes made while testing (revert it before committing).
+
+### Data changes / testing preference
+
+- For data setup and verification, **edit the database directly** (Django shell,
+  `manage.py`, or SQLite) rather than driving the web UI. Example:
+
+  ```bash
+  cd backend && .venv/bin/python manage.py shell
+  ```
+
+  ```python
+  from production.models import Operator, ProductionRecord, PartProductionHistory
+  ProductionRecord.objects.all().delete()
+  PartProductionHistory.objects.all().delete()
+  Operator.objects.all().delete()
+  Operator.objects.create(name='unknown', employee_id='unknown', role='Operator')
+  ```
+
+- Verify via API (`curl` against `/api/operators/`, etc.) instead of browser
+  walkthroughs unless the task is explicitly UI-related.
