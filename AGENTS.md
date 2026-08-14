@@ -16,6 +16,10 @@ monitoring app:
 | Backend  | `backend/`  | `.venv/bin/python manage.py runserver 0.0.0.0:8000`  | http://localhost:8000   |
 | Frontend | `frontend/` | `npm run dev`                                         | http://localhost:5173   |
 
+**Quick start (both servers):** from repo root run `./scripts/dev-servers.sh`.
+Subcommands: `start` (default), `stop`, `restart`, `status`. Servers run in tmux
+sessions `nissanoee-backend` and `nissanoee-frontend`.
+
 Both must run for end-to-end use. The frontend reads `VITE_API_URL` from
 `frontend/.env` (defaults to `http://localhost:8000/api`). Backend CORS already
 allows `http://localhost:5173`.
