@@ -49,7 +49,7 @@ export function DefectReasonManager({
       setFormData({
         category: reason.category,
         subcategory: reason.subcategory,
-        specificReason: reason.specificReason,
+        specificReason: reason.specificReason ?? '',
         machineTypes: reason.machineTypes || [],
         machineIds: reason.machineIds || [],
         partIds: reason.partIds || [],
@@ -76,7 +76,7 @@ export function DefectReasonManager({
   };
 
   const handleSubmit = () => {
-    if (!formData.category.trim() || !formData.subcategory.trim() || !formData.specificReason.trim()) {
+    if (!formData.category.trim() || !formData.subcategory.trim()) {
       toast.error('Please fill in all required fields');
       return;
     }
@@ -190,7 +190,7 @@ export function DefectReasonManager({
                       {reasons.map(reason => (
                         <TableRow key={reason.id}>
                           <TableCell className="font-medium">{reason.subcategory}</TableCell>
-                          <TableCell>{reason.specificReason}</TableCell>
+                          <TableCell>{reason.specificReason || '—'}</TableCell>
                           <TableCell>
                             <div className="flex flex-wrap gap-1">
                               {reason.machineTypes && reason.machineTypes.length > 0 && (
@@ -286,7 +286,7 @@ export function DefectReasonManager({
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="specificReason">Specific Reason *</Label>
+                <Label htmlFor="specificReason">Specific Reason (optional)</Label>
                 <Input
                   id="specificReason"
                   value={formData.specificReason}

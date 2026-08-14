@@ -54,7 +54,7 @@ export interface DefectReason {
   id: string;
   category: string;
   subcategory: string;
-  specificReason: string;
+  specificReason?: string;
   machineTypes?: ('casting' | 'machining')[]; // Filter by machine type
   machineIds?: string[]; // Filter by specific machines
   partIds?: string[]; // Filter by specific parts

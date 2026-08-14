@@ -72,7 +72,7 @@ export function DefectCategorySelector({
       return defectReasons.find(r =>
         r.category === value.category &&
         r.subcategory === value.subcategory &&
-        r.specificReason === value.specificReason
+        (r.specificReason || '') === (value.specificReason || '')
       )?.id || '';
     });
 
@@ -89,7 +89,7 @@ export function DefectCategorySelector({
       onChange({
         category: reason.category,
         subcategory: reason.subcategory,
-        specificReason: reason.specificReason,
+        specificReason: reason.specificReason || undefined,
         comment: comment || undefined,
       });
     };
@@ -169,7 +169,9 @@ export function DefectCategorySelector({
                     >
                       <div className="flex flex-col items-start leading-tight">
                         <span>{reason.subcategory}</span>
-                        <span className="text-xs opacity-70 font-normal">{reason.specificReason}</span>
+                        {reason.specificReason && (
+                          <span className="text-xs opacity-70 font-normal">{reason.specificReason}</span>
+                        )}
                       </div>
                       {isItemSelected && (
                         <Badge className="ml-auto bg-red-900">✓</Badge>
