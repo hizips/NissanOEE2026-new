@@ -3,6 +3,7 @@ from django.contrib.auth.models import User
 from production.models import (
     Operator, Die, Part, Machine, DefectReason,
     DowntimeReasonItem, ProcessReason, ProductionRecord, PartProductionHistory,
+    DowntimeEventHistory, ScheduledDowntime,
 )
 
 class Command(BaseCommand):
@@ -22,9 +23,12 @@ class Command(BaseCommand):
             User.objects.create_superuser(username='admin', email='admin@example.com', password='admin')
             self.stdout.write('Created manager user (username: admin, password: admin)')
 
-        # 2. Operators (single placeholder operator)
+        # 2. Operators and transactional data reset
+        DowntimeEventHistory.objects.all().delete()
+        ScheduledDowntime.objects.all().delete()
         ProductionRecord.objects.all().delete()
         PartProductionHistory.objects.all().delete()
+        Machine.objects.all().delete()
         Operator.objects.all().delete()
         Operator.objects.get_or_create(
             employee_id='unknown',
@@ -57,31 +61,13 @@ class Command(BaseCommand):
             {'name': 'Valve Cover', 'part_number': 'VC-001', 'cycle_time': 1.5, 'dies': []},
             {'name': 'Manifold', 'part_number': 'MF-001', 'cycle_time': 1.7, 'dies': []},
         ]
-        part_objs = {}
         for p in parts_data:
             defaults = {'name': p['name'], 'cycle_time': p['cycle_time']}
             obj, _ = Part.objects.get_or_create(part_number=p['part_number'], defaults=defaults)
             for d in p['dies']:
                 obj.dies.add(die_objs[d])
-            part_objs[p['part_number']] = obj
 
-        # 5. Machines
-        machines_data = [
-            {'name': 'Casting Machine A1', 'machine_id': 'M-CAST-001', 'type': 'casting', 'ideal_cycle_time': 2.5, 'status': 'running', 'parts': ['CH-001', 'EB-001', 'TC-001']},
-            {'name': 'Casting Machine A2', 'machine_id': 'M-CAST-002', 'type': 'casting', 'ideal_cycle_time': 2.5, 'status': 'maintenance', 'parts': ['CH-001', 'EB-001']},
-            {'name': 'Die Cast Machine B1', 'machine_id': 'M-CAST-003', 'type': 'casting', 'ideal_cycle_time': 3.0, 'status': 'running', 'parts': ['EB-001', 'TC-001']},
-            {'name': 'CNC Machine B1', 'machine_id': 'M-MACH-001', 'type': 'machining', 'ideal_cycle_time': 1.8, 'status': 'running', 'parts': ['BC-001', 'WH-001']},
-            {'name': 'CNC Machine B2', 'machine_id': 'M-MACH-002', 'type': 'machining', 'ideal_cycle_time': 2.0, 'status': 'running', 'parts': ['WH-001', 'OP-001']},
-            {'name': 'Milling Machine C1', 'machine_id': 'M-MACH-003', 'type': 'machining', 'ideal_cycle_time': 2.2, 'status': 'idle', 'parts': ['OP-001', 'VC-001']},
-            {'name': 'Drilling Machine D1', 'machine_id': 'M-MACH-004', 'type': 'machining', 'ideal_cycle_time': 1.5, 'status': 'running', 'parts': ['VC-001', 'MF-001']},
-            {'name': 'Finishing Machine E2', 'machine_id': 'M-MACH-005', 'type': 'machining', 'ideal_cycle_time': 1.7, 'status': 'running', 'parts': ['BC-001', 'MF-001']},
-        ]
-        for m in machines_data:
-            defaults = {'name': m['name'], 'type': m['type'], 'ideal_cycle_time': m['ideal_cycle_time'], 'status': m['status']}
-            obj, _ = Machine.objects.get_or_create(machine_id=m['machine_id'], defaults=defaults)
-            for p in m['parts']:
-                obj.supported_parts.add(part_objs[p])
-
+        # 5. Machines (none seeded)
         # 6. Defect Reasons
         CASTING_DEFECT_SUBCATEGORIES = [
             'Drag',
