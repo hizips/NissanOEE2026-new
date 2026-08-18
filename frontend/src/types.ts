@@ -112,6 +112,7 @@ export interface PartProductionHistory {
   defectSpecificReason?: string;
   comment?: string;
   timestamp: number;
+  ocrJobId?: string;
 }
 
 export interface DowntimeEventHistory {
@@ -127,6 +128,7 @@ export interface DowntimeEventHistory {
   reason: DowntimeReasonPath;
   comment?: string;
   timestamp: number;
+  ocrJobId?: string;
 }
 
 export interface DowntimeEvent {
@@ -162,6 +164,7 @@ export interface ProductionRecord {
   defects?: DefectEntry[];
   operatorName: string;
   notes?: string;
+  ocrJobId?: string;
   timestamp: number;
 }
 

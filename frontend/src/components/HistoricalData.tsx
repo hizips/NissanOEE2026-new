@@ -143,6 +143,24 @@ export function HistoricalData({
     });
   }, [downtimeEventHistory, searchTerm, filterMachine, filterOperator, filterShift, filterDateFrom, filterDateTo]);
 
+  const filteredProductionRecords = useMemo(() => {
+    return productionRecords.filter(record => {
+      const matchesSearch =
+        record.machineName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        record.operatorName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        record.notes?.toLowerCase().includes(searchTerm.toLowerCase());
+
+      const matchesMachine = filterMachine === 'all' || record.machineId === filterMachine;
+      const matchesOperator = filterOperator === 'all' || record.operatorName === filterOperator;
+      const matchesShift = filterShift === 'all' || record.shift === filterShift;
+      const matchesDateFrom = !filterDateFrom || record.date >= filterDateFrom;
+      const matchesDateTo = !filterDateTo || record.date <= filterDateTo;
+
+      return matchesSearch && matchesMachine && matchesOperator && matchesShift &&
+        matchesDateFrom && matchesDateTo;
+    });
+  }, [productionRecords, searchTerm, filterMachine, filterOperator, filterShift, filterDateFrom, filterDateTo]);
+
   // Group by machine
   const machineGroups = useMemo(() => {
     const groups: {
@@ -172,17 +190,23 @@ export function HistoricalData({
       };
     });
 
-    // Group part history
+    // Group part history for detail tables
     filteredPartHistory.forEach(record => {
       if (groups[record.machineId]) {
         groups[record.machineId].partHistory.push(record);
-        groups[record.machineId].totalParts++;
-        if (record.result === 'PASS') {
-          groups[record.machineId].passCount++;
-        } else {
-          groups[record.machineId].notGoodCount++;
-        }
       }
+    });
+
+    // Aggregate PASS / NG totals from shift records
+    filteredProductionRecords.forEach(record => {
+      if (groups[record.machineId]) {
+        groups[record.machineId].passCount += record.goodCount || 0;
+        groups[record.machineId].notGoodCount += record.defectCount || 0;
+      }
+    });
+
+    Object.values(groups).forEach(group => {
+      group.totalParts = group.passCount + group.notGoodCount;
     });
 
     // Group downtime events
@@ -209,7 +233,7 @@ export function HistoricalData({
     });
 
     return groups;
-  }, [machines, filteredPartHistory, filteredDowntimeEvents]);
+  }, [machines, filteredPartHistory, filteredDowntimeEvents, filteredProductionRecords]);
 
   const toggleMachine = (machineId: string) => {
     const newExpanded = new Set(expandedMachines);
@@ -374,7 +398,7 @@ export function HistoricalData({
   };
 
   return (
-    <div className="bg-white space-y-6">
+    <div className="space-y-6 w-full">
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">

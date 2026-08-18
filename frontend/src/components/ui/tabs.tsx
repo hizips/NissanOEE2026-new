@@ -26,7 +26,7 @@ function TabsList({
     <TabsPrimitive.List
       data-slot="tabs-list"
       className={cn(
-        "bg-white text-slate-600 inline-flex h-12 w-full items-center justify-center rounded-xl p-1 shadow-inner border border-slate-300/40",
+        "bg-slate-200/90 text-slate-600 inline-flex h-12 w-full items-center justify-center rounded-xl p-1.5 gap-1 shadow-inner border border-slate-300/60",
         className,
       )}
       {...props}
@@ -42,8 +42,9 @@ function TabsTrigger({
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
       className={cn(
-        // Added explicit bg-white and shadow for the active state
-        "data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:shadow-sm",
+        "text-slate-600 hover:text-slate-900",
+        "data-[state=active]:bg-white data-[state=active]:text-blue-700 data-[state=active]:shadow-md",
+        "data-[state=active]:ring-2 data-[state=active]:ring-blue-500/80 data-[state=active]:border data-[state=active]:border-blue-400",
         "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:outline-ring",
         "inline-flex h-full flex-1 items-center justify-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-semibold whitespace-nowrap transition-all",
         "disabled:pointer-events-none disabled:opacity-50",

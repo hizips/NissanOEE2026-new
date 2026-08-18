@@ -8,3 +8,18 @@ __pycache__/
 
 # OS files
 .DS_Store
+
+# Secrets (Datalab API key, etc.)
+.env
+.env.*
+!.env.example
+
+# Local SQLite (do not commit runtime/test data)
+db.sqlite3
+db.sqlite3-journal
+
+# OCR runtime data (uploads, jobs)
+ocr/data/
+
+# Collected static files (admin CSS/JS via collectstatic + WhiteNoise)
+staticfiles/

@@ -8,7 +8,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import type { Machine, ProductionRecord, OEEMetrics } from '@/types';
+import type { Machine, ProductionRecord, OEEMetrics, Part, PartProductionHistory } from '@/types';
+import { calculateOEEMetrics } from '@/utils/oee';
 import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
 import { TrendingUp, Activity, CheckCircle2, AlertCircle, AlertTriangle, XCircle, Clock } from 'lucide-react';
 import { format, subDays, startOfDay } from 'date-fns';
@@ -16,37 +17,13 @@ import { format, subDays, startOfDay } from 'date-fns';
 interface DashboardProps {
   machines: Machine[];
   productionRecords: ProductionRecord[];
+  parts: Part[];
+  partProductionHistory: PartProductionHistory[];
 }
 
-export function Dashboard({ machines, productionRecords }: DashboardProps) {
-  const calculateOEE = (record: ProductionRecord, machine: Machine): OEEMetrics => {
-    const operatingTime = record.plannedProductionTime - record.downtime;
-
-    // Availability = (Operating Time / Planned Production Time) × 100%
-    const availability = record.plannedProductionTime > 0
-      ? (operatingTime / record.plannedProductionTime) * 100
-      : 0;
-
-    // Performance = (Ideal Cycle Time × Total Count / Operating Time) × 100%
-    const performance = operatingTime > 0
-      ? ((machine.idealCycleTime * record.totalCount) / operatingTime) * 100
-      : 0;
-
-    // Quality = (Good Count / Total Count) × 100%
-    const quality = record.totalCount > 0
-      ? (record.goodCount / record.totalCount) * 100
-      : 0;
-
-    // OEE = Availability × Performance × Quality
-    const oee = (availability * performance * quality) / 10000;
-
-    return {
-      availability: Math.min(availability, 100),
-      performance: Math.min(performance, 100),
-      quality: Math.min(quality, 100),
-      oee: Math.min(oee, 100),
-    };
-  };
+export function Dashboard({ machines, productionRecords, parts, partProductionHistory }: DashboardProps) {
+  const calculateOEE = (record: ProductionRecord, machine: Machine): OEEMetrics =>
+    calculateOEEMetrics(record, machine, parts, partProductionHistory);
 
   const overallMetrics = useMemo(() => {
     if (productionRecords.length === 0) {
@@ -75,7 +52,7 @@ export function Dashboard({ machines, productionRecords }: DashboardProps) {
       quality: avg.quality / metricsArray.length,
       oee: avg.oee / metricsArray.length,
     };
-  }, [productionRecords, machines]);
+  }, [productionRecords, machines, parts, partProductionHistory]);
 
   const machinePerformance = useMemo(() => {
     return machines.map(machine => {
@@ -111,7 +88,7 @@ export function Dashboard({ machines, productionRecords }: DashboardProps) {
         recordCount: count,
       };
     });
-  }, [machines, productionRecords]);
+  }, [machines, productionRecords, parts, partProductionHistory]);
 
   const dailyTrend = useMemo(() => {
     const last7Days = Array.from({ length: 7 }, (_, i) => {
@@ -139,7 +116,7 @@ export function Dashboard({ machines, productionRecords }: DashboardProps) {
         records: dayRecords.length,
       };
     });
-  }, [productionRecords, machines]);
+  }, [productionRecords, machines, parts, partProductionHistory]);
 
   const shiftDistribution = useMemo(() => {
     const shifts = { morning: 0, afternoon: 0, night: 0 };
@@ -216,7 +193,7 @@ export function Dashboard({ machines, productionRecords }: DashboardProps) {
   }, [machines, productionRecords, machinePerformance, overallMetrics]);
 
   return (
-    <div className="bg-white space-y-6">
+    <div className="space-y-6 w-full">
       {alerts.length > 0 && (
         <div className="space-y-2">
           {alerts.map((alert, index) => (

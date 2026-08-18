@@ -1,8 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Label } from '@/components/ui/label';
+import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { ChevronRight, List, PenLine } from 'lucide-react';
+import type { DowntimeReasonItem } from '@/types';
 
 export interface DowntimeReasonPath {
   category: string;
@@ -15,264 +18,295 @@ export interface DowntimeReasonPath {
 interface DowntimeReasonSelectorProps {
   value: DowntimeReasonPath | null;
   onChange: (path: DowntimeReasonPath) => void;
+  downtimeReasons: DowntimeReasonItem[];
+  machineId?: string;
+  machineType?: string;
 }
 
-// Hierarchical downtime reason structure
-const downtimeHierarchy = {
-  'Machine': {
-    'Die': {
-      'Core Pin': ['Pin #1', 'Pin #2', 'Pin #3', 'Pin #4', 'Pin #5'],
-      'Insert': ['Insert A', 'Insert B', 'Insert C'],
-      'Ejector': ['Ejector Pin #1', 'Ejector Pin #2', 'Ejector System'],
-      'Cavity': ['Cavity 1', 'Cavity 2', 'Cavity 3', 'Cavity 4'],
-    },
-    'Core': {
-      'Core Pin': ['Core #1', 'Core #2', 'Core #3'],
-      'Sleeve': ['Sleeve Front', 'Sleeve Rear'],
-      'Guide': ['Guide Pin 1', 'Guide Pin 2'],
-    },
-    'Cooling': {
-      'Water Line': ['Line #1', 'Line #2', 'Line #3', 'Line #4'],
-      'Fitting': ['Fitting A', 'Fitting B', 'Fitting C'],
-      'Valve': ['Inlet Valve', 'Outlet Valve', 'Control Valve'],
-    },
-    'Conveyor': {
-      'Belt': ['Main Belt', 'Transfer Belt'],
-      'Motor': ['Drive Motor', 'Servo Motor'],
-      'Sensor': ['Entry Sensor', 'Exit Sensor', 'Position Sensor'],
-    },
-    'Hydraulic': {
-      'Pump': ['Main Pump', 'Auxiliary Pump'],
-      'Cylinder': ['Clamp Cylinder', 'Ejector Cylinder'],
-      'Valve': ['Pressure Valve', 'Flow Valve', 'Relief Valve'],
-    },
-  },
-  'Tooling': {
-    'Die Change': {
-      'Replace Die': ['Complete replacement', 'Scheduled change'],
-    },
-    'Die Set': {
-      'Wear': ['Excessive wear', 'Surface damage', 'Misalignment'],
-      'Breakage': ['Crack', 'Chip', 'Complete break'],
-      'Maintenance': ['Scheduled maintenance', 'Cleaning required'],
-    },
-    'Insert': {
-      'Replacement': ['Normal wear', 'Emergency replacement'],
-      'Adjustment': ['Height adjustment', 'Position adjustment'],
-    },
-  },
-  'Material': {
-    'Raw Material': {
-      'Shortage': ['Stock depleted', 'Delivery delayed'],
-      'Quality Issue': ['Contamination', 'Wrong specification', 'Moisture content'],
-    },
-    'Consumables': {
-      'Release Agent': ['Empty', 'Low level'],
-      'Lubricant': ['Empty', 'Wrong type'],
-    },
-  },
-  'Process': {
-    'Quality': {
-      'First Article': ['Initial setup verification'],
-      'Adjustment': ['Temperature adjustment', 'Pressure adjustment', 'Time adjustment'],
-      'Inspection': ['Dimensional check', 'Visual inspection'],
-    },
-    'Setup': {
-      'Changeover': ['Die change', 'Material change'],
-      'Calibration': ['Sensor calibration', 'Pressure calibration'],
-    },
-  },
-  'Other': {
-    'Planned': {
-      'Meeting': ['Shift meeting', 'Safety briefing'],
-      'Break': ['Scheduled break', 'Lunch break'],
-    },
-    'Administrative': {
-      'Documentation': ['Paperwork', 'Data entry'],
-      'Training': ['Operator training', 'Safety training'],
-    },
-  },
-};
+const LEVEL_BADGES = [
+  { label: 'Level 1', className: 'bg-blue-600 text-white' },
+  { label: 'Level 2', className: 'bg-purple-600 text-white' },
+  { label: 'Level 3', className: 'bg-orange-600 text-white' },
+  { label: 'Level 4', className: 'bg-green-600 text-white' },
+];
 
-export function DowntimeReasonSelector({ value, onChange }: DowntimeReasonSelectorProps) {
-  const [category, setCategory] = useState<string>(value?.category || '');
-  const [subsystem, setSubsystem] = useState<string>(value?.subsystem || '');
-  const [component, setComponent] = useState<string>(value?.component || '');
-  const [specificItem, setSpecificItem] = useState<string>(value?.specificItem || '');
+const LEVEL_LABELS = ['Category', 'Subsystem', 'Component', 'Specific Item'];
+const LEVEL_INDENT = ['', 'ml-6', 'ml-12', 'ml-16'];
+const LEVEL_BORDER = [
+  'border-blue-300',
+  'border-purple-300',
+  'border-orange-300',
+  'border-green-300',
+];
 
-  // Update path whenever any level changes (flexible selection)
-  useEffect(() => {
-    if (category) {
-      // Build path dynamically based on selected levels
-      const pathParts = [category];
-      if (subsystem) pathParts.push(subsystem);
-      if (component) pathParts.push(component);
-      if (specificItem) pathParts.push(specificItem);
-
-      const fullPath = pathParts.join(' → ');
-
-      onChange({
-        category,
-        subsystem: subsystem || undefined,
-        component: component || undefined,
-        specificItem: specificItem || undefined,
-        fullPath,
-      });
+function matchesMachineFilter(
+  reason: DowntimeReasonItem,
+  machineId?: string,
+  machineType?: string,
+): boolean {
+  if (reason.machineIds?.length) {
+    if (!machineId || !reason.machineIds.includes(machineId)) return false;
+  }
+  if (reason.machineTypes?.length) {
+    if (!machineType || !reason.machineTypes.includes(machineType as 'casting' | 'machining')) {
+      return false;
     }
-  }, [category, subsystem, component, specificItem, onChange]);
+  }
+  return true;
+}
 
-  const categories = Object.keys(downtimeHierarchy);
-  const subsystems = category ? Object.keys(downtimeHierarchy[category as keyof typeof downtimeHierarchy] || {}) : [];
-  const components = category && subsystem
-    ? Object.keys((downtimeHierarchy[category as keyof typeof downtimeHierarchy] as any)?.[subsystem] || {})
-    : [];
-  const specificItems = category && subsystem && component
-    ? ((downtimeHierarchy[category as keyof typeof downtimeHierarchy] as any)?.[subsystem]?.[component] || [])
-    : [];
+function buildPathFromNames(names: string[]): DowntimeReasonPath {
+  const fullPath = names.join(' → ');
+  return {
+    category: names[0] || '',
+    subsystem: names[1],
+    component: names[2],
+    specificItem: names[3],
+    fullPath,
+  };
+}
+
+function findPredefinedSelection(
+  value: DowntimeReasonPath | null,
+  reasons: DowntimeReasonItem[],
+): string[] {
+  if (!value?.fullPath) return [];
+
+  const activeReasons = reasons.filter(r => r.active);
+  const parts = value.fullPath.split(' → ').map(p => p.trim()).filter(Boolean);
+  if (parts.length === 0) return [];
+
+  const selectedIds: string[] = [];
+  let parentId: string | undefined;
+
+  for (const part of parts) {
+    const match = activeReasons.find(r => {
+      if (parentId) return r.parentId === parentId && r.name === part;
+      return r.level === 1 && r.name === part;
+    });
+    if (!match) return [];
+    selectedIds.push(match.id);
+    parentId = match.id;
+  }
+
+  return selectedIds;
+}
+
+export function DowntimeReasonSelector({
+  value,
+  onChange,
+  downtimeReasons,
+  machineId,
+  machineType,
+}: DowntimeReasonSelectorProps) {
+  const filteredReasons = useMemo(
+    () =>
+      downtimeReasons.filter(
+        r => r.active && matchesMachineFilter(r, machineId, machineType),
+      ),
+    [downtimeReasons, machineId, machineType],
+  );
+
+  const [mode, setMode] = useState<'predefined' | 'manual'>(() => {
+    if (!value?.fullPath) return 'predefined';
+    return findPredefinedSelection(value, downtimeReasons).length > 0
+      ? 'predefined'
+      : 'manual';
+  });
+  const [selectedIds, setSelectedIds] = useState<string[]>(() =>
+    findPredefinedSelection(value, downtimeReasons),
+  );
+  const [manualText, setManualText] = useState(() => {
+    if (!value?.fullPath) return '';
+    return findPredefinedSelection(value, downtimeReasons).length > 0
+      ? ''
+      : value.fullPath;
+  });
+
+  useEffect(() => {
+    if (!value?.fullPath) {
+      setSelectedIds([]);
+      setManualText('');
+      return;
+    }
+
+    const predefinedIds = findPredefinedSelection(value, downtimeReasons);
+    if (predefinedIds.length > 0) {
+      setMode('predefined');
+      setSelectedIds(predefinedIds);
+      setManualText('');
+    } else {
+      setMode('manual');
+      setSelectedIds([]);
+      setManualText(value.fullPath);
+    }
+  }, [value?.fullPath, downtimeReasons]);
+
+  const getChildren = (parentId?: string) =>
+    filteredReasons.filter(r =>
+      parentId ? r.parentId === parentId : r.level === 1,
+    );
+
+  const emitPredefinedPath = (ids: string[]) => {
+    const names = ids
+      .map(id => filteredReasons.find(r => r.id === id)?.name)
+      .filter((name): name is string => Boolean(name));
+    if (names.length > 0) {
+      onChange(buildPathFromNames(names));
+    }
+  };
+
+  const handleModeChange = (nextMode: 'predefined' | 'manual') => {
+    setMode(nextMode);
+    if (nextMode === 'predefined') {
+      setManualText('');
+      if (selectedIds.length > 0) {
+        emitPredefinedPath(selectedIds);
+      }
+    } else {
+      setSelectedIds([]);
+      if (manualText.trim()) {
+        onChange(buildPathFromNames([manualText.trim()]));
+      }
+    }
+  };
+
+  const handleLevelChange = (levelIndex: number, reasonId: string) => {
+    const nextIds = [...selectedIds.slice(0, levelIndex), reasonId];
+    setSelectedIds(nextIds);
+    emitPredefinedPath(nextIds);
+  };
+
+  const handleManualChange = (text: string) => {
+    setManualText(text);
+    const trimmed = text.trim();
+    if (trimmed) {
+      onChange(buildPathFromNames([trimmed]));
+    }
+  };
+
+  const selectedNames = selectedIds
+    .map(id => filteredReasons.find(r => r.id === id)?.name)
+    .filter((name): name is string => Boolean(name));
+
+  const levelOptions: DowntimeReasonItem[][] = [];
+  let parentId: string | undefined;
+  for (let level = 0; level < 4; level++) {
+    const options = getChildren(parentId);
+    if (options.length === 0) break;
+    levelOptions.push(options);
+    if (selectedIds[level]) {
+      parentId = selectedIds[level];
+    } else {
+      break;
+    }
+  }
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-4">
       <div className="mb-3 bg-blue-50 border-2 border-blue-300 rounded-lg p-4">
-        <Label className="text-base font-semibold mb-2 block text-blue-900">Downtime Reason </Label>
+        <Label className="text-base font-semibold mb-3 block text-blue-900">
+          Downtime Reason
+        </Label>
+        <div className="grid grid-cols-2 gap-3">
+          <Button
+            type="button"
+            variant={mode === 'predefined' ? 'default' : 'outline'}
+            className={`h-12 text-base font-semibold ${
+              mode === 'predefined'
+                ? 'bg-blue-600 hover:bg-blue-700'
+                : 'border-2 border-blue-300'
+            }`}
+            onClick={() => handleModeChange('predefined')}
+          >
+            <List className="h-5 w-5 mr-2" />
+            Select from list
+          </Button>
+          <Button
+            type="button"
+            variant={mode === 'manual' ? 'default' : 'outline'}
+            className={`h-12 text-base font-semibold ${
+              mode === 'manual'
+                ? 'bg-blue-600 hover:bg-blue-700'
+                : 'border-2 border-blue-300'
+            }`}
+            onClick={() => handleModeChange('manual')}
+          >
+            <PenLine className="h-5 w-5 mr-2" />
+            Enter manually
+          </Button>
+        </div>
       </div>
 
-      {/* Level 1: Category */}
-      <div>
-        <div className="flex items-center gap-2 mb-2">
-          <Badge className="bg-blue-600 text-white">Level 1</Badge>
-          <Label className="font-semibold">Category</Label>
-        </div>
-        <Select
-          value={category}
-          onValueChange={(val) => {
-            setCategory(val);
-            setSubsystem('');
-            setComponent('');
-            setSpecificItem('');
-          }}
-        >
-          <SelectTrigger className="h-14 text-lg border-2 border-blue-300">
-            <SelectValue placeholder="Select category..." />
-          </SelectTrigger>
-          <SelectContent>
-            {categories.map((cat) => (
-              <SelectItem key={cat} value={cat} className="text-base py-3">
-                {cat}
-              </SelectItem>
+      {mode === 'predefined' ? (
+        filteredReasons.length === 0 ? (
+          <div className="rounded-lg border-2 border-dashed border-slate-300 p-4 text-slate-600">
+            No predefined downtime reasons are configured. Use manual entry or ask a
+            manager to add reasons.
+          </div>
+        ) : (
+          <>
+            {levelOptions.map((options, levelIndex) => (
+              <div key={levelIndex} className={LEVEL_INDENT[levelIndex]}>
+                <div className="flex items-center gap-2 mb-2">
+                  <Badge className={LEVEL_BADGES[levelIndex].className}>
+                    {LEVEL_BADGES[levelIndex].label}
+                  </Badge>
+                  <Label className="font-semibold">{LEVEL_LABELS[levelIndex]}</Label>
+                </div>
+                <Select
+                  value={selectedIds[levelIndex] || ''}
+                  onValueChange={(val) => handleLevelChange(levelIndex, val)}
+                >
+                  <SelectTrigger
+                    className={`h-14 text-lg border-2 ${LEVEL_BORDER[levelIndex]}`}
+                  >
+                    <SelectValue placeholder={`Select ${LEVEL_LABELS[levelIndex].toLowerCase()}...`} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {options.map(option => (
+                      <SelectItem key={option.id} value={option.id} className="text-base py-3">
+                        {option.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             ))}
-          </SelectContent>
-        </Select>
-      </div>
 
-      {/* Level 2: Subsystem */}
-      {category && (
-        <div className="ml-6">
-          <div className="flex items-center gap-2 mb-2">
-            <Badge className="bg-purple-600 text-white">Level 2</Badge>
-            <Label className="font-semibold">Subsystem</Label>
-          </div>
-          <Select
-            value={subsystem}
-            onValueChange={(val) => {
-              setSubsystem(val);
-              setComponent('');
-              setSpecificItem('');
-            }}
-          >
-            <SelectTrigger className="h-14 text-lg border-2 border-purple-300">
-              <SelectValue placeholder="Select subsystem..." />
-            </SelectTrigger>
-            <SelectContent>
-              {subsystems.map((sub) => (
-                <SelectItem key={sub} value={sub} className="text-base py-3">
-                  {sub}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      )}
-
-      {/* Level 3: Component */}
-      {category && subsystem && (
-        <div className="ml-12">
-          <div className="flex items-center gap-2 mb-2">
-            <Badge className="bg-orange-600 text-white">Level 3</Badge>
-            <Label className="font-semibold">Component</Label>
-          </div>
-          <Select
-            value={component}
-            onValueChange={(val) => {
-              setComponent(val);
-              setSpecificItem('');
-            }}
-          >
-            <SelectTrigger className="h-14 text-lg border-2 border-orange-300">
-              <SelectValue placeholder="Select component..." />
-            </SelectTrigger>
-            <SelectContent>
-              {components.map((comp) => (
-                <SelectItem key={comp} value={comp} className="text-base py-3">
-                  {comp}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      )}
-
-      {/* Level 4: Specific Item */}
-      {category && subsystem && component && (
-        <div className="ml-18">
-          <div className="flex items-center gap-2 mb-2">
-            <Badge className="bg-green-600 text-white">Level 4</Badge>
-            <Label className="font-semibold">Specific Item</Label>
-          </div>
-          <Select
-            value={specificItem}
-            onValueChange={setSpecificItem}
-          >
-            <SelectTrigger className="h-14 text-lg border-2 border-green-300">
-              <SelectValue placeholder="Select specific item..." />
-            </SelectTrigger>
-            <SelectContent>
-              {specificItems.map((item: string) => (
-                <SelectItem key={item} value={item} className="text-base py-3">
-                  {item}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      )}
-
-      {/* Full Path Display - Shows at any level */}
-      {category && (
-        <div className="mt-6 p-4 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg border-2 border-green-400 animate-in fade-in slide-in-from-top-2">
-          <div className="text-sm font-semibold text-green-800 mb-2 flex items-center gap-2">
-            <Badge className="bg-green-600 text-white">Selected Path</Badge>
-          </div>
-          <div className="flex items-center gap-2 text-base font-bold text-green-900 flex-wrap">
-            <span className="bg-white px-3 py-2 rounded border-2 border-blue-300">{category}</span>
-            {subsystem && (
-              <>
-                <ChevronRight className="h-5 w-5 text-green-600" />
-                <span className="bg-white px-3 py-2 rounded border-2 border-purple-300">{subsystem}</span>
-              </>
+            {selectedNames.length > 0 && (
+              <div className="mt-6 p-4 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg border-2 border-green-400">
+                <div className="text-sm font-semibold text-green-800 mb-2 flex items-center gap-2">
+                  <Badge className="bg-green-600 text-white">Selected Path</Badge>
+                </div>
+                <div className="flex items-center gap-2 text-base font-bold text-green-900 flex-wrap">
+                  {selectedNames.map((name, index) => (
+                    <span key={`${name}-${index}`} className="flex items-center gap-2">
+                      {index > 0 && <ChevronRight className="h-5 w-5 text-green-600" />}
+                      <span
+                        className={`bg-white px-3 py-2 rounded border-2 ${LEVEL_BORDER[index] || 'border-green-300'}`}
+                      >
+                        {name}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              </div>
             )}
-            {component && (
-              <>
-                <ChevronRight className="h-5 w-5 text-green-600" />
-                <span className="bg-white px-3 py-2 rounded border-2 border-orange-300">{component}</span>
-              </>
-            )}
-            {specificItem && (
-              <>
-                <ChevronRight className="h-5 w-5 text-green-600" />
-                <span className="bg-white px-3 py-2 rounded border-2 border-green-300">{specificItem}</span>
-              </>
-            )}
-          </div>
+          </>
+        )
+      ) : (
+        <div>
+          <Label htmlFor="manual-downtime-reason" className="font-semibold mb-2 block">
+            Reason description
+          </Label>
+          <Input
+            id="manual-downtime-reason"
+            value={manualText}
+            onChange={(e) => handleManualChange(e.target.value)}
+            placeholder="Describe the downtime reason..."
+            className="h-14 text-lg border-2 border-blue-300"
+          />
         </div>
       )}
     </div>

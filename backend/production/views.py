@@ -56,3 +56,19 @@ class DowntimeEventHistoryViewSet(viewsets.ModelViewSet):
 class ProductionRecordViewSet(viewsets.ModelViewSet):
     queryset = ProductionRecord.objects.all().order_by('-timestamp')
     serializer_class = ProductionRecordSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        PartProductionHistory.objects.filter(
+            machine=instance.machine,
+            date=instance.date,
+            shift=instance.shift,
+            operator_name=instance.operator_name,
+        ).delete()
+        DowntimeEventHistory.objects.filter(
+            machine=instance.machine,
+            date=instance.date,
+            shift=instance.shift,
+            operator_name=instance.operator_name,
+        ).delete()
+        return super().destroy(request, *args, **kwargs)

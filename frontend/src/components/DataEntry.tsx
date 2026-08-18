@@ -31,7 +31,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
-import type { Machine, ProductionRecord, PartProductionHistory, DowntimeEventHistory, DefectReason, Part } from '@/types';
+import type { Machine, ProductionRecord, PartProductionHistory, DowntimeEventHistory, DefectReason, Part, DowntimeReasonItem } from '@/types';
 import type { OperatorSetupData } from '@/components/OperatorSetup';
 import { DefectCategorySelector } from '@/components/DefectCategorySelector';
 import { DowntimeReasonSelector, type DowntimeReasonPath } from '@/components/DowntimeReasonSelector';
@@ -47,10 +47,10 @@ interface DataEntryProps {
   onAddDowntimeEvent: (event: Omit<DowntimeEventHistory, 'id' | 'timestamp'>) => Promise<void> | void;
   onUpdatePartHistory: (id: string, updates: Partial<PartProductionHistory>) => Promise<void> | void;
   currentUser: { employeeId: string; role: 'operator' | 'manager' } | null;
-  loginTimestamp: Date;
   operatorSetup?: OperatorSetupData;
   onEditSetup?: () => void;
   defectReasons: DefectReason[];
+  downtimeReasons: DowntimeReasonItem[];
   onCheckOff?: () => void;
 }
 
@@ -92,11 +92,11 @@ export function DataEntry({
   onAddDowntimeEvent,
   onUpdatePartHistory, // Keep this
   currentUser,
-  loginTimestamp,
   operatorSetup,
   onEditSetup,
   onCheckOff,
   defectReasons,
+  downtimeReasons,
 }: DataEntryProps) {
   const [products, setProducts] = useState<ProductRecord[]>([]);
   const [showDefectSelector, setShowDefectSelector] = useState(false);
@@ -748,7 +748,7 @@ export function DataEntry({
         </CardHeader>
         <CardContent className="pt-6 space-y-4">
           <p className="text-slate-600">
-            Your session may have timed out or the page was refreshed. You need to re-verify your machine and part selection to continue.
+            Operator setup is not complete. Return to setup to verify your machine and part selection before continuing.
           </p>
           <div className="flex gap-4">
             {/* Add this button to allow returning to setup without logging out */}
@@ -1195,6 +1195,9 @@ export function DataEntry({
                   <DowntimeReasonSelector
                     value={currentDowntime.reason}
                     onChange={(reason) => setCurrentDowntime({ ...currentDowntime, reason })}
+                    downtimeReasons={downtimeReasons}
+                    machineId={operatorSetup.machineId}
+                    machineType={machines.find(m => m.id === operatorSetup.machineId)?.type}
                   />
                 </div>
 

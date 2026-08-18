@@ -42,7 +42,7 @@ export function ReasonManagement({
   onDeleteProcessReason,
 }: ReasonManagementProps) {
   return (
-    <div className="bg-white space-y-6">
+    <div className="space-y-6 w-full">
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">

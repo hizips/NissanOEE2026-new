@@ -105,6 +105,7 @@ class PartProductionHistory(models.Model):
     defect_specific_reason = models.CharField(max_length=200, blank=True, null=True)
     comment = models.TextField(blank=True, null=True)
     timestamp = models.DateTimeField(auto_now_add=True)
+    ocr_job_id = models.CharField(max_length=200, blank=True, default='', db_index=True)
 
 class DowntimeEventHistory(models.Model):
     SHIFT_CHOICES = [('morning', 'Morning'), ('afternoon', 'Afternoon'), ('night', 'Night')]
@@ -123,6 +124,7 @@ class DowntimeEventHistory(models.Model):
     reason_full_path = models.CharField(max_length=300)
     comment = models.TextField(blank=True, null=True)
     timestamp = models.DateTimeField(auto_now_add=True)
+    ocr_job_id = models.CharField(max_length=200, blank=True, default='', db_index=True)
 
 class ProductionRecord(models.Model):
     SHIFT_CHOICES = [('morning', 'Morning'), ('afternoon', 'Afternoon'), ('night', 'Night')]
@@ -147,3 +149,4 @@ class ProductionRecord(models.Model):
     timestamp = models.DateTimeField(auto_now_add=True)
     downtime_events = models.JSONField(blank=True, default=list)
     defects = models.JSONField(blank=True, default=list)
+    ocr_job_id = models.CharField(max_length=200, blank=True, default='', db_index=True)

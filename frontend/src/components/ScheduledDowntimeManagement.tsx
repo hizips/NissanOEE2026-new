@@ -168,7 +168,7 @@ export function ScheduledDowntimeManagement({
   });
 
   return (
-    <div className="bg-white">
+    <div className="space-y-6 w-full">
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">

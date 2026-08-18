@@ -29,4 +29,5 @@ urlpatterns = [
     path('api/auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     # Application Endpoints
     path('api/', include(router.urls)),
+    path('api/ocr/', include('ocr.urls')),
 ]

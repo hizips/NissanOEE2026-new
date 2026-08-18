@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DailyProductionSheet_Downtime",
+  "type": "object",
+  "description": "Extract ONLY header identity fields and Reasons For Downtime for all shifts present (D/S, A/S, and N/S when filled) from HPDC Daily Production Sheet PR-FO-4623. Do NOT extract Reject Data, Labour, Machine Counter, Rework, or Minor Stops.\n\nLEFT side of the form only (exclude the vertical Labour / Reject Data band).\n\nSHIFT HEADERS vs DOWNTIME: Fields labeled MEETINGS, POLISH, CHK LIST, CLEAN UP / C/UP FILTERS WATER, Plunger Tip Life Count, Vacuum Valve # belong in the shift summary — NEVER as downtime_entries reasons.\n\nMULTI-LINE REASONS: If a row has reason text but no times, merge that text into the previous timed event's reason. If reason is a ditto mark like ----\"\"------, use the same reason as the row above.\n\nTIME COLUMNS (left to right): M/C Stop (machine stopped) → Maint/T/Room Start (repair started, often blank) → Maint/T/Room Finish (repair finished, often blank) → M/C Start (machine restarted).\n\nDo NOT extract Maint Or T/Room Sign.\n\nWarm Up Prod = warmup_shot_count (number of warmup shots after downtime, NOT minutes).",
+  "properties": {
+    "header": {
+      "type": "object",
+      "description": "Top header handwritten fields for this production day/machine.",
+      "properties": {
+        "machine": {
+          "type": "string",
+          "description": "Header field labeled Machine. Usually 2-4 digit number + one symbol usually # + 1-2 digit number (e.g. 1250#2)."
+        },
+        "product": {
+          "type": "string",
+          "description": "Header field labeled Product (product/part code as written)."
+        },
+        "shot_sleeve": {
+          "type": "string",
+          "description": "Header field labeled Shot Sleeve #."
+        },
+        "die_number": {
+          "type": "string",
+          "description": "Header field labeled Die #."
+        },
+        "date": {
+          "type": "string",
+          "description": "Header field labeled Date — production date (not footer revision date)."
+        }
+      },
+      "required": ["machine", "product", "date"]
+    },
+    "shifts": {
+      "type": "array",
+      "description": "One object per shift block that has any handwritten content. Prefer order N/S, D/S, A/S. Include N/S when present; omit a shift only if that whole block is blank.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "shift": {
+            "type": "string",
+            "description": "Shift code.",
+            "enum": ["N/S", "D/S", "A/S"]
+          },
+          "plunger_tip_life_count": {
+            "type": "number",
+            "description": "Shift header Plunger Tip Life Count for this shift."
+          },
+          "vacuum_valve": {
+            "type": "string",
+            "description": "Shift header Vacuum Valve # as written."
+          },
+          "meetings_minutes": {
+            "type": "number",
+            "description": "Shift header MEETINGS minutes. Not a downtime reason."
+          },
+          "polish_minutes": {
+            "type": "number",
+            "description": "Shift header POLISH minutes. Not a downtime reason."
+          },
+          "chk_list_minutes": {
+            "type": "number",
+            "description": "Shift header CHK LIST minutes. Not a downtime reason."
+          },
+          "cleanup_minutes": {
+            "type": "number",
+            "description": "Shift header CLEAN UP or C/UP, FILTERS, WATER minutes. Not a downtime reason."
+          },
+          "downtime_entries": {
+            "type": "array",
+            "description": "Logical downtime events for this shift after multi-line/ditto merge. Exclude empty rows. Exclude any row that is only MEETINGS/POLISH/CHK LIST/CLEAN UP header text. Do not extract Sign.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Handwritten downtime reason (e.g. Lump on casting, Trim Press fault). Include merged continuation text. Resolve ditto to previous reason."
+                },
+                "reason_continued_from_previous": {
+                  "type": "boolean",
+                  "description": "True if reason came from a ditto / same-as-above mark."
+                },
+                "mc_stop": {
+                  "type": "string",
+                  "description": "M/C Stop time — when the machine stopped (e.g. 7:50)."
+                },
+                "maint_troom_start": {
+                  "type": "string",
+                  "description": "Maint/T/Room Start — when repair/maintenance started. Often blank."
+                },
+                "maint_troom_finish": {
+                  "type": "string",
+                  "description": "Maint/T/Room Finish — when repair/maintenance finished. Often blank."
+                },
+                "mc_start": {
+                  "type": "string",
+                  "description": "M/C Start — when the machine started again."
+                },
+                "warmup_shot_count": {
+                  "type": "number",
+                  "description": "Warm Up Prod — count of warmup shots after this downtime (not minutes)."
+                },
+                "maint_minutes": {
+                  "type": "number",
+                  "description": "Downtime In Minutes → Maint."
+                },
+                "tool_minutes": {
+                  "type": "number",
+                  "description": "Downtime In Minutes → Tool."
+                },
+                "eng_minutes": {
+                  "type": "number",
+                  "description": "Downtime In Minutes → Eng."
+                },
+                "prod_minutes": {
+                  "type": "number",
+                  "description": "Downtime In Minutes → Prod."
+                },
+                "other_minutes": {
+                  "type": "number",
+                  "description": "Downtime In Minutes → Other."
+                }
+              },
+              "required": ["reason"]
+            }
+          }
+        },
+        "required": ["shift"]
+      },
+      "minItems": 1,
+      "maxItems": 3
+    }
+  },
+  "required": ["header", "shifts"]
+}

@@ -1,0 +1,17 @@
+{
+  "_comment": "Example field_data for Datalab /api/v1/fill. Fill WRITES values onto a blank form; it does NOT extract from a filled scan. Pair with templates/daily_production_sheet_blank.pdf",
+  "context": "PR-FO-4623 HPDC Daily Production Sheet blank template. Fields are on a landscape production form with downtime grid on the left and Reject Data on the right.",
+  "field_data": {
+    "machine": {"value": "", "description": "Machine number at top left, labeled Machine"},
+    "product": {"value": "", "description": "Product code at top, labeled Product"},
+    "shot_sleeve": {"value": "", "description": "Shot Sleeve # in header"},
+    "die_number": {"value": "", "description": "Die # in header"},
+    "date": {"value": "", "description": "Production date in header"},
+    "total_rejects_d_s": {"value": "", "description": "Total Rejects row, D/S column count"},
+    "total_rejects_a_s": {"value": "", "description": "Total Rejects row, A/S column count"},
+    "total_rejects_total": {"value": "", "description": "Total Rejects row, Total column"},
+    "warmup_d_s": {"value": "", "description": "Reject Data Warmup row D/S count"},
+    "warmup_a_s": {"value": "", "description": "Reject Data Warmup row A/S count"},
+    "warmup_total": {"value": "", "description": "Reject Data Warmup row Total count"}
+  }
+}

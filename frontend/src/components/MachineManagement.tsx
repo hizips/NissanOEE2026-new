@@ -6,7 +6,8 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
-import type { Machine, ProductionRecord, OEEMetrics, Part } from '@/types';
+import type { Machine, ProductionRecord, Part, PartProductionHistory } from '@/types';
+import { calculateOEEPercent } from '@/utils/oee';
 import { Settings, Plus, Edit2, Trash2, Save, X, Activity, TrendingUp, AlertCircle, Shield, Factory, Package } from 'lucide-react';
 import {
   AlertDialog,
@@ -23,6 +24,7 @@ import { toast } from 'sonner';
 interface MachineManagementProps {
   machines: Machine[];
   productionRecords: ProductionRecord[];
+  partProductionHistory: PartProductionHistory[];
   parts: Part[];
   onUpdateMachine: (id: string, updates: Partial<Machine>) => void;
   onAddMachine: (machine: Omit<Machine, 'id'>) => void;
@@ -36,11 +38,13 @@ interface MachineStats {
   avgDowntime: number;
   totalDowntime: number;
   downtimePercentage: number;
+  defectiveRate: number;
 }
 
 export function MachineManagement({
   machines,
   productionRecords,
+  partProductionHistory,
   parts,
   onUpdateMachine,
   onAddMachine,
@@ -74,20 +78,6 @@ export function MachineManagement({
     active: true,
   });
 
-  const calculateOEE = (record: ProductionRecord, machine: Machine): number => {
-    const operatingTime = record.plannedProductionTime - record.downtime;
-    const availability = record.plannedProductionTime > 0
-      ? (operatingTime / record.plannedProductionTime) * 100
-      : 0;
-    const performance = operatingTime > 0
-      ? ((machine.idealCycleTime * record.totalCount) / operatingTime) * 100
-      : 0;
-    const quality = record.totalCount > 0
-      ? (record.goodCount / record.totalCount) * 100
-      : 0;
-    return Math.min((availability * performance * quality) / 10000, 100);
-  };
-
   const machineStats = useMemo(() => {
     const stats = new Map<string, MachineStats>();
 
@@ -101,16 +91,21 @@ export function MachineManagement({
           avgDowntime: 0,
           totalDowntime: 0,
           downtimePercentage: 0,
+          defectiveRate: 0,
         });
         return;
       }
 
       const totalDowntime = records.reduce((sum, r) => sum + r.downtime, 0);
       const totalPlanned = records.reduce((sum, r) => sum + r.plannedProductionTime, 0);
+      const totalGood = records.reduce((sum, r) => sum + (r.goodCount || 0), 0);
+      const totalDefect = records.reduce((sum, r) => sum + (r.defectCount || 0), 0);
+      const totalProduced = totalGood + totalDefect;
       const avgDowntime = totalDowntime / records.length;
-      const oeeValues = records.map(r => calculateOEE(r, machine));
+      const oeeValues = records.map(r => calculateOEEPercent(r, machine, parts, partProductionHistory));
       const avgOEE = oeeValues.reduce((sum, oee) => sum + oee, 0) / oeeValues.length;
       const downtimePercentage = totalPlanned > 0 ? (totalDowntime / totalPlanned) * 100 : 0;
+      const defectiveRate = totalProduced > 0 ? (totalDefect / totalProduced) * 100 : 0;
 
       stats.set(machine.id, {
         totalRecords: records.length,
@@ -118,11 +113,12 @@ export function MachineManagement({
         avgDowntime,
         totalDowntime,
         downtimePercentage,
+        defectiveRate,
       });
     });
 
     return stats;
-  }, [machines, productionRecords]);
+  }, [machines, productionRecords, parts, partProductionHistory]);
 
   const handleAddMachine = () => {
     if (!newMachine.name.trim()) {
@@ -229,8 +225,14 @@ export function MachineManagement({
     return 'text-red-600';
   };
 
+  const getDefectRateColor = (rate: number) => {
+    if (rate <= 2) return 'text-green-600';
+    if (rate <= 5) return 'text-yellow-600';
+    return 'text-red-600';
+  };
+
   return (
-    <div className="bg-white space-y-6">
+    <div className="space-y-6 w-full">
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -572,7 +574,7 @@ export function MachineManagement({
                           </div>
 
                           {stats && stats.totalRecords > 0 && (
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 border-t">
+                            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 pt-4 border-t">
                               <div className="space-y-2">
                                 <div className="flex items-center justify-between text-sm">
                                   <span className="text-slate-600">Average OEE</span>
@@ -583,6 +585,19 @@ export function MachineManagement({
                                 <Progress value={stats.avgOEE} className="h-2" />
                                 <p className="text-xs text-slate-500">
                                   {stats.avgOEE >= 85 ? 'Excellent performance' : stats.avgOEE >= 70 ? 'Good performance' : 'Below target'}
+                                </p>
+                              </div>
+
+                              <div className="space-y-2">
+                                <div className="flex items-center justify-between text-sm">
+                                  <span className="text-slate-600">Defective Rate</span>
+                                  <span className={`font-bold text-lg ${getDefectRateColor(stats.defectiveRate)}`}>
+                                    {stats.defectiveRate.toFixed(1)}%
+                                  </span>
+                                </div>
+                                <Progress value={Math.min(stats.defectiveRate, 100)} className="h-2" />
+                                <p className="text-xs text-slate-500">
+                                  NG parts ÷ total parts (shift records)
                                 </p>
                               </div>
 
@@ -649,8 +664,13 @@ export function MachineManagement({
           <h4 className="font-semibold text-sm mb-3">About Machine Configuration</h4>
           <div className="space-y-2 text-sm text-slate-700">
             <p>
-              <strong>Ideal Cycle Time:</strong> The theoretical fastest time to manufacture one part under optimal conditions.
-              This is used to calculate the Performance component of OEE.
+              <strong>OEE:</strong> For each shift record, Availability × Performance × Quality (capped at 100%), then averaged across all shifts for the machine.
+              Availability = (planned time − downtime) ÷ planned time.
+              Performance = (part cycle time × total count) ÷ operating time, using cycle times from part history or the machine&apos;s supported parts.
+              Quality = good parts ÷ total count.
+            </p>
+            <p>
+              <strong>Defective Rate:</strong> Total NG parts ÷ (good + NG parts) across all shift records for the machine.
             </p>
             <p>
               <strong>Machine Status:</strong> Current operational state of the machine. Update this to reflect real-time conditions.

@@ -21,8 +21,10 @@ Subcommands: `start` (default), `stop`, `restart`, `status`. Servers run in tmux
 sessions `nissanoee-backend` and `nissanoee-frontend`.
 
 Both must run for end-to-end use. The frontend reads `VITE_API_URL` from
-`frontend/.env` (defaults to `http://localhost:8000/api`). Backend CORS already
-allows `http://localhost:5173`.
+`frontend/.env` (defaults to `http://localhost:8000/api`). On a `192.168.2.*`
+page load it calls `http://<that-host>:8000/api` instead so LAN clients work.
+Backend `ALLOWED_HOSTS` / CORS / CSRF allow `192.168.2.0/24`. Dev servers bind
+`0.0.0.0` (see `./scripts/dev-servers.sh status` for this machine’s LAN URLs).
 
 ### Lint / test / build
 
@@ -42,9 +44,10 @@ allows `http://localhost:5173`.
   the TypeScript/ESLint toolchain even though the lockfile pinned them; these were
   restored so `npm run lint` and `npm run build` work. Run `npm install` (not
   `npm ci`) in `frontend/`.
-- `backend/config/settings.py` hard-codes `DEBUG = False`. The JSON API works fine
-  with this, but Django `runserver` will not serve the admin's static CSS and error
-  pages are non-verbose. This is intentional in the repo; do not change it for dev.
+- `backend/config/settings.py` hard-codes `DEBUG = False` (intentional). Admin CSS/JS
+  are served by WhiteNoise from `STATIC_ROOT` — after clone or a Django upgrade run
+  `cd backend && .venv/bin/python manage.py collectstatic --noinput`. Error pages
+  remain non-verbose; do not flip `DEBUG` for local admin styling.
 - Login credentials seeded in the committed DB: manager `admin` / `admin` and
   operator `operator` / `operator_password`. To (re)seed a fresh DB run
   `.venv/bin/python manage.py migrate` then `.venv/bin/python manage.py seed_data`.
@@ -70,3 +73,15 @@ allows `http://localhost:5173`.
 
 - Verify via API (`curl` against `/api/operators/`, etc.) instead of browser
   walkthroughs unless the task is explicitly UI-related.
+
+### OCR Import documentation
+
+OCR behaviour and feature notes live in [`docs/OCR_IMPORT.md`](docs/OCR_IMPORT.md).
+When you add or change an important OCR feature (UI or backend), update that file
+in the same change (workflow, naming, import rules, API, changelog table).
+
+### Session re-authentication
+
+API clients (`frontend/src/services/api.ts`, `ocrApi.ts`) open a re-login dialog on
+401 / “Authentication required” instead of reloading the page. Implementation:
+`authSession.ts`, `ReauthDialog.tsx`. Failed requests retry once after sign-in.

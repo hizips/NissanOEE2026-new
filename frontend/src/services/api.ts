@@ -1,9 +1,26 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+import { getApiBaseUrl } from './apiBase';
+import { isUnauthorizedResponse, waitForReauth } from './authSession';
+
+const API_BASE_URL = getApiBaseUrl();
+
+/** Login without attaching JWT or triggering the re-auth flow. */
+export async function loginRequest(credentials: { username: string; password: string }) {
+  const response = await fetch(`${API_BASE_URL}/auth/login/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(credentials),
+  });
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(errorBody || `${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<{ access: string; refresh?: string }>;
+}
 
 /**
  * Helper function for fetch to handle JSON parsing and errors.
  */
-async function fetchClient(endpoint: string, options: RequestInit = {}) {
+async function fetchClient(endpoint: string, options: RequestInit = {}, retried = false) {
   const url = `${API_BASE_URL}${endpoint}`;
 
   const token = sessionStorage.getItem('oee-auth-token');
@@ -21,11 +38,15 @@ async function fetchClient(endpoint: string, options: RequestInit = {}) {
 
   if (!response.ok) {
     const errorBody = await response.text();
-    // If unauthorized, could automatically log out the user here
-    if (response.status === 401) {
+    const isLogin = endpoint.includes('/auth/login/');
+    if (!isLogin && !retried && isUnauthorizedResponse(response.status, errorBody)) {
+      sessionStorage.removeItem('oee-auth-token');
+      await waitForReauth();
+      return fetchClient(endpoint, options, true);
+    }
+    if (isUnauthorizedResponse(response.status, errorBody)) {
       sessionStorage.removeItem('oee-auth-token');
       sessionStorage.removeItem('oee-authenticated');
-      // window.location.reload(); // Optional: force reload to login screen
     }
     throw new Error(`API Request Failed: ${response.status} ${response.statusText} - ${errorBody}`);
   }
@@ -41,10 +62,7 @@ async function fetchClient(endpoint: string, options: RequestInit = {}) {
  * Authentication API Endpoints
  */
 export const authApi = {
-  login: (credentials: any) => fetchClient('/auth/login/', {
-    method: 'POST',
-    body: JSON.stringify(credentials),
-  })
+  login: (credentials: { username: string; password: string }) => loginRequest(credentials),
 };
 
 /**
@@ -56,8 +74,10 @@ const mapPayloadForBackend = (data: any) => {
 
   // Map frontend relationship IDs to backend ForeignKey field names
   // and ensure they are integers (not strings)
-  if ('machineId' in mapped) {
-    mapped.machine = parseInt(mapped.machineId) || mapped.machineId;
+  // Map frontend machineId to backend machine FK only for referencing models.
+  // Machine entities use machineId as their business identifier (machine_id).
+  if ('machineId' in mapped && /^\d+$/.test(String(mapped.machineId))) {
+    mapped.machine = parseInt(mapped.machineId, 10);
     delete mapped.machineId;
   }
   if ('partId' in mapped) {
@@ -144,6 +164,7 @@ const mapResponseForFrontend = (data: any) => {
   if ('downtime_events' in mapped) mapped.downtimeEvents = mapped.downtime_events;
   if ('machine_name' in mapped) mapped.machineName = mapped.machine_name;
   if ('part_name' in mapped) mapped.partName = mapped.part_name;
+  if ('ocr_job_id' in mapped) mapped.ocrJobId = mapped.ocr_job_id;
 
   // Restore nested downtime reason for frontend
   if ('reasonCategory' in mapped) {

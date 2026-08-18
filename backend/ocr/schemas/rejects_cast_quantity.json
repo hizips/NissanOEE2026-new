@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DailyProductionSheet_Rejects_And_CastQuantity",
+  "type": "object",
+  "description": "Extract Reject Data counts and Cast Quantity (Machine Counter Readings) from HPDC Daily Production Sheet PR-FO-4623. RIGHT side of the form only.\n\nExtract N/S, D/S, A/S, and Total columns where present (night shift may be blank on some sheets).\n\nDo NOT extract downtime reasons, labour initials, rework, minor stops, or broken-core-pin blocks.\n\nReject Data includes the Test / QA row and the Total Rejects row. Warmup per-shift counts should match the sum of warmup shots from downtime for those shifts when both are filled.\n\nTotal Rejects.total is usually the sum of filled shifts but may be slightly higher — prefer the written Total value.",
+  "properties": {
+    "rejects": {
+      "type": "array",
+      "description": "One object per printed Reject Data reason row (including Test / QA). Include the row even if counts are blank (use null). Place each count only under the correct reason label — do not shift values to neighboring reasons.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Printed reject reason label (or Test / QA).",
+            "enum": [
+              "Drag",
+              "Crack",
+              "Leaker",
+              "Warmup",
+              "Hand. Damage",
+              "Trim Damage",
+              "Robot Damage",
+              "Misrun",
+              "Gate Break",
+              "Broken Biscuit",
+              "Short Biscuit",
+              "Blister",
+              "Porosity",
+              "Chipping",
+              "Distortion",
+              "Soldering",
+              "Laser issues",
+              "Stain",
+              "Broken C' Pin",
+              "Dropped in PIT",
+              "Test / QA"
+            ]
+          },
+          "n_s": {
+            "type": "number",
+            "description": "Reject count under N/S for this reason."
+          },
+          "d_s": {
+            "type": "number",
+            "description": "Reject count under D/S for this reason."
+          },
+          "a_s": {
+            "type": "number",
+            "description": "Reject count under A/S for this reason."
+          },
+          "total": {
+            "type": "number",
+            "description": "Reject Total column for this reason as written."
+          }
+        },
+        "required": ["reason"]
+      }
+    },
+    "total_rejects": {
+      "type": "object",
+      "description": "Row labeled Total Rejects under Reject Data.",
+      "properties": {
+        "n_s": {
+          "type": "number",
+          "description": "Total Rejects under N/S."
+        },
+        "d_s": {
+          "type": "number",
+          "description": "Total Rejects under D/S."
+        },
+        "a_s": {
+          "type": "number",
+          "description": "Total Rejects under A/S."
+        },
+        "total": {
+          "type": "number",
+          "description": "Total Rejects grand total as written (may exceed sum of shifts slightly)."
+        }
+      }
+    },
+    "machine_counter": {
+      "type": "object",
+      "description": "Cast Quantity → Machine Counter Readings. Extract N/S, D/S, A/S, and Total.",
+      "properties": {
+        "start": {
+          "type": "object",
+          "description": "Start counter row.",
+          "properties": {
+            "n_s": { "type": "number", "description": "Start counter N/S." },
+            "d_s": { "type": "number", "description": "Start counter D/S." },
+            "a_s": { "type": "number", "description": "Start counter A/S." },
+            "total": { "type": "number", "description": "Start counter Total if present." }
+          }
+        },
+        "stop": {
+          "type": "object",
+          "description": "Stop counter row.",
+          "properties": {
+            "n_s": { "type": "number", "description": "Stop counter N/S." },
+            "d_s": { "type": "number", "description": "Stop counter D/S." },
+            "a_s": { "type": "number", "description": "Stop counter A/S." },
+            "total": { "type": "number", "description": "Stop counter Total if present." }
+          }
+        },
+        "machine": {
+          "type": "object",
+          "description": "Machine count row (typically Stop−Start for the shift).",
+          "properties": {
+            "n_s": { "type": "number", "description": "Machine count N/S." },
+            "d_s": { "type": "number", "description": "Machine count D/S." },
+            "a_s": { "type": "number", "description": "Machine count A/S." },
+            "total": { "type": "number", "description": "Machine count Total as written." }
+          }
+        },
+        "ems_counter": {
+          "type": "object",
+          "description": "EMS Counter row.",
+          "properties": {
+            "n_s": { "type": "number", "description": "EMS Counter N/S." },
+            "d_s": { "type": "number", "description": "EMS Counter D/S." },
+            "a_s": { "type": "number", "description": "EMS Counter A/S." },
+            "total": { "type": "number", "description": "EMS Counter Total if present." }
+          }
+        }
+      }
+    }
+  },
+  "required": ["rejects", "total_rejects", "machine_counter"]
+}

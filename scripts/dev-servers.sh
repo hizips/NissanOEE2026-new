@@ -114,7 +114,7 @@ start_frontend() {
   ensure_frontend_deps
   echo "Starting frontend (Vite) in tmux session '$FRONTEND_SESSION'..."
   start_session "$FRONTEND_SESSION" "$FRONTEND_DIR" \
-    "npm run dev -- --host 127.0.0.1 --port ${FRONTEND_PORT}"
+    "npm run dev -- --host 0.0.0.0 --port ${FRONTEND_PORT}"
   wait_for_port "$FRONTEND_PORT" "Frontend"
 }
 
@@ -153,15 +153,30 @@ stop_frontend() {
   fi
 }
 
+lan_ipv4() {
+  if command -v hostname >/dev/null 2>&1; then
+    hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^192\.168\.2\.' | head -n 1
+  fi
+}
+
 print_status() {
   echo "NissanOEE dev servers"
   echo "  Backend  ($BACKEND_PORT): $(port_in_use "$BACKEND_PORT" && echo UP || echo DOWN)  session=$(session_exists "$BACKEND_SESSION" && echo yes || echo no)"
   echo "  Frontend ($FRONTEND_PORT): $(port_in_use "$FRONTEND_PORT" && echo UP || echo DOWN)  session=$(session_exists "$FRONTEND_SESSION" && echo yes || echo no)"
   echo ""
-  echo "URLs:"
+  echo "URLs (this machine):"
   echo "  API:  http://localhost:${BACKEND_PORT}/api/"
   echo "  App:  http://localhost:${FRONTEND_PORT}/"
   echo "  Admin: http://localhost:${BACKEND_PORT}/admin/"
+  local lan
+  lan="$(lan_ipv4 || true)"
+  if [[ -n "${lan}" ]]; then
+    echo ""
+    echo "LAN (192.168.2.0/24):"
+    echo "  App:  http://${lan}:${FRONTEND_PORT}/"
+    echo "  API:  http://${lan}:${BACKEND_PORT}/api/"
+    echo "  Admin: http://${lan}:${BACKEND_PORT}/admin/"
+  fi
 }
 
 cmd_start() {

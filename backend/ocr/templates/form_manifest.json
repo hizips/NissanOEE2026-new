@@ -1,0 +1,41 @@
+{
+  "document_id": "PR-FO-4623",
+  "title": "DAILY PRODUCTION SHEET",
+  "process": "HPDC",
+  "revision_date": "16/10/2017",
+  "author": "Tan Nguyen",
+  "notes": "Blank canonical template. Field keys match schemas/daily_production_sheet.json and templates/fill_field_data.example.json. Use Extract to read filled scans; use Fill only to write values onto a blank/template form.",
+  "reject_reasons": [
+    "Drag",
+    "Crack",
+    "Leaker",
+    "Warmup",
+    "Hand. Damage",
+    "Trim Damage",
+    "Robot Damage",
+    "Misrun",
+    "Gate Break",
+    "Broken Biscuit",
+    "Short Biscuit",
+    "Blister",
+    "Porosity",
+    "Chipping",
+    "Distortion",
+    "Soldering",
+    "Laser issues",
+    "Stain",
+    "Broken C' Pin",
+    "Dropped in PIT"
+  ],
+  "shifts": ["N/S", "D/S", "A/S"],
+  "downtime_row_slots_per_shift": 8,
+  "sections": {
+    "header": ["machine", "product", "shot_sleeve", "die_number", "date"],
+    "downtime": "Reasons For Downtime left grid (excludes Labour / Reject Data vertical column)",
+    "labour": ["Support", "Operator", "Relief Operator"],
+    "reject_data": "Printed reject reasons + N/S D/S A/S Total counts + Total Rejects",
+    "machine_counter": ["Start", "Stop", "Machine", "EMS Counter"],
+    "rework": ["Impregnation", "Re Leak Test"],
+    "minor_stops": ["No Of Stops", "Time In Min"]
+  }
+}

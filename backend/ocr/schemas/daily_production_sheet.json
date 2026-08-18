@@ -1,0 +1,334 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DailyProductionSheet_PR_FO_4623",
+  "type": "object",
+  "description": "Full structured extraction for HPDC Daily Production Sheet (Document ID PR-FO-4623). Landscape printed form with handwritten entries. Shifts: N/S (night), D/S (day), A/S (afternoon). LEFT = Reasons For Downtime (exclude the vertical Labour / Reject Data band). RIGHT = Labour initials + Reject Data counts + Machine Counter Readings. Leave blank cells as null. Times as strings (e.g. 7:50). Counts as numbers.\n\nDOWNTIME MULTI-LINE RULES: Operators may use several rows for one event. If a row has a reason but NO time entries, treat that reason text as additional writing for the previous timed row (concatenate / merge into that event's reason). If the reason cell contains a ditto mark such as ----\"\"------ or similar quotes/dashes meaning 'same as above', copy the reason from the previous event and keep this row's times as a separate event only if times are filled; if only ditto with no times, merge into previous. Do not invent a separate downtime event for continuation-only rows.\n\nWARMUP CROSS-CHECK: For each shift, the sum of downtime_entries.warmup_shot_count should equal rejects[Warmup].n_s / .d_s / .a_s for that shift when both sides are filled (small mismatches possible).\n\nIGNORE on this form for extraction: LAZER MARK START/FINISH (rarely filled), Rework, Minor Stops, Broken Core Pin, Casting located, Signature.",
+  "properties": {
+    "form_meta": {
+      "type": "object",
+      "description": "Printed form identity from title/footer (usually pre-printed, not handwritten).",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Form title at top center. Expected: DAILY PRODUCTION SHEET."
+        },
+        "process": {
+          "type": "string",
+          "description": "Process label in the top-right box. Expected: HPDC."
+        },
+        "document_id": {
+          "type": "string",
+          "description": "Printed Document ID at bottom-left footer. Expected: PR-FO-4623."
+        },
+        "form_revision_date": {
+          "type": "string",
+          "description": "Printed control/revision date in the footer (e.g. 16/10/2017). Not the production Date in the header."
+        },
+        "form_author": {
+          "type": "string",
+          "description": "Printed name in the footer (e.g. Tan Nguyen)."
+        }
+      }
+    },
+
+    "header": {
+      "type": "object",
+      "description": "Top header fields for this production day / machine (handwritten).",
+      "properties": {
+        "machine": {
+          "type": "string",
+          "description": "Header field labeled Machine (e.g. 1250 #2)."
+        },
+        "product": {
+          "type": "string",
+          "description": "Header field labeled Product (product / part code as written)."
+        },
+        "shot_sleeve": {
+          "type": "string",
+          "description": "Header field labeled Shot Sleeve #."
+        },
+        "die_number": {
+          "type": "string",
+          "description": "Header field labeled Die #."
+        },
+        "date": {
+          "type": "string",
+          "description": "Header field labeled Date — production date for this sheet (not footer revision date)."
+        }
+      },
+      "required": ["machine", "product", "date"]
+    },
+
+    "shifts": {
+      "type": "array",
+      "description": "One object per shift block on the left side of the form, in order N/S, D/S, A/S when present.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "shift": {
+            "type": "string",
+            "description": "Shift code for this block.",
+            "enum": ["N/S", "D/S", "A/S"]
+          },
+          "plunger_tip_life_count": {
+            "type": "number",
+            "description": "Shift header field Plunger Tip Life Count."
+          },
+          "vacuum_valve": {
+            "type": "string",
+            "description": "Shift header field Vacuum Valve # (as written)."
+          },
+          "meetings_minutes": {
+            "type": "number",
+            "description": "Shift header field MEETINGS — minutes spent in meetings this shift."
+          },
+          "polish_minutes": {
+            "type": "number",
+            "description": "Shift header field POLISH — minutes for polish this shift."
+          },
+          "chk_list_minutes": {
+            "type": "number",
+            "description": "Shift header field CHK LIST — minutes for checklist this shift."
+          },
+          "cleanup_minutes": {
+            "type": "number",
+            "description": "Shift header field CLEAN UP or C/UP, FILTERS, WATER — minutes for cleanup / filters / water this shift."
+          },
+          "d_stamp": {
+            "type": "string",
+            "description": "Shift header field labeled D STAMP if present (value as written). Null if blank. Do not confuse with cleanup minutes."
+          },
+          "downtime_entries": {
+            "type": "array",
+            "description": "Logical downtime events for this shift AFTER applying multi-line merge and ditto rules. Each item is one event (not necessarily one printed grid row). Exclude empty rows. Exclude Labour / Reject Data cells.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Full downtime reason text for this event. Include continuation-line text merged from following untimed rows. If the grid showed a ditto mark (e.g. ----\"\"------), use the same reason as the previous event."
+                },
+                "reason_continued_from_previous": {
+                  "type": "boolean",
+                  "description": "True if this event's reason came from a ditto / same-as-above mark rather than new wording."
+                },
+                "source_row_texts": {
+                  "type": "array",
+                  "description": "Optional: raw reason-cell strings from each printed row that were merged into this event (for audit).",
+                  "items": { "type": "string" }
+                },
+                "sign": {
+                  "type": "string",
+                  "description": "Maint Or T/Room Sign — initials of the person signing maintenance/toolroom for this event (e.g. M.A, PL, SP)."
+                },
+                "mc_stop": {
+                  "type": "string",
+                  "description": "Time column M/C Stop — clock time the machine stopped (e.g. 7:50)."
+                },
+                "maint_troom_start": {
+                  "type": "string",
+                  "description": "Time column Maint/T/Room Start — clock time repair/maintenance started. Often blank."
+                },
+                "maint_troom_finish": {
+                  "type": "string",
+                  "description": "Time column Maint/T/Room Finish — clock time repair/maintenance finished. Often blank."
+                },
+                "mc_start": {
+                  "type": "string",
+                  "description": "Time column M/C Start — clock time the machine started again."
+                },
+                "warmup_shot_count": {
+                  "type": "number",
+                  "description": "Warm Up Prod column — count of warmup shots after this downtime (not minutes). Per shift, these counts should add up to the Reject Data Warmup reason count for that same shift when both are filled."
+                },
+                "maint_minutes": {
+                  "type": "number",
+                  "description": "Downtime In Minutes → Maint."
+                },
+                "tool_minutes": {
+                  "type": "number",
+                  "description": "Downtime In Minutes → Tool."
+                },
+                "eng_minutes": {
+                  "type": "number",
+                  "description": "Downtime In Minutes → Eng (engineering)."
+                },
+                "prod_minutes": {
+                  "type": "number",
+                  "description": "Downtime In Minutes → Prod (production)."
+                },
+                "other_minutes": {
+                  "type": "number",
+                  "description": "Downtime In Minutes → Other."
+                }
+              },
+              "required": ["reason"]
+            }
+          }
+        },
+        "required": ["shift"]
+      },
+      "minItems": 1,
+      "maxItems": 3
+    },
+
+    "labour": {
+      "type": "object",
+      "description": "Right-side Labour block. Cells are initials of who worked each role on each shift.",
+      "properties": {
+        "support": {
+          "type": "object",
+          "description": "Labour row labeled Support — initials.",
+          "properties": {
+            "n_s": { "type": "string", "description": "Support initials for N/S." },
+            "d_s": { "type": "string", "description": "Support initials for D/S." },
+            "a_s": { "type": "string", "description": "Support initials for A/S." }
+          }
+        },
+        "operator": {
+          "type": "object",
+          "description": "Labour row labeled Operator — initials.",
+          "properties": {
+            "n_s": { "type": "string", "description": "Operator initials for N/S." },
+            "d_s": { "type": "string", "description": "Operator initials for D/S." },
+            "a_s": { "type": "string", "description": "Operator initials for A/S." }
+          }
+        },
+        "relief_operator": {
+          "type": "object",
+          "description": "Labour row labeled Relief Operator — initials.",
+          "properties": {
+            "n_s": { "type": "string", "description": "Relief Operator initials for N/S." },
+            "d_s": { "type": "string", "description": "Relief Operator initials for D/S." },
+            "a_s": { "type": "string", "description": "Relief Operator initials for A/S." }
+          }
+        }
+      }
+    },
+
+    "rejects": {
+      "type": "array",
+      "description": "Reject Data section including Test / QA. One object per printed reason row. Include the row even if all counts are blank (use nulls). Warmup shift counts should match the sum of that shift's downtime warmup_shot_count when both sides are filled.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Printed reject reason label (or Test / QA).",
+            "enum": [
+              "Drag",
+              "Crack",
+              "Leaker",
+              "Warmup",
+              "Hand. Damage",
+              "Trim Damage",
+              "Robot Damage",
+              "Misrun",
+              "Gate Break",
+              "Broken Biscuit",
+              "Short Biscuit",
+              "Blister",
+              "Porosity",
+              "Chipping",
+              "Distortion",
+              "Soldering",
+              "Laser issues",
+              "Stain",
+              "Broken C' Pin",
+              "Dropped in PIT",
+              "Test / QA"
+            ]
+          },
+          "n_s": {
+            "type": "number",
+            "description": "Reject count for N/S for this reason."
+          },
+          "d_s": {
+            "type": "number",
+            "description": "Reject count for D/S for this reason."
+          },
+          "a_s": {
+            "type": "number",
+            "description": "Reject count for A/S for this reason."
+          },
+          "total": {
+            "type": "number",
+            "description": "Reject Total column for this reason as written (often N/S+D/S+A/S)."
+          }
+        },
+        "required": ["reason"]
+      }
+    },
+
+    "total_rejects": {
+      "type": "object",
+      "description": "Row labeled Total Rejects under Reject Data. The Total cell is intended to be N/S+D/S+A/S but may be higher if extra rejects were added after shift counts were written.",
+      "properties": {
+        "n_s": {
+          "type": "number",
+          "description": "Total Rejects under N/S."
+        },
+        "d_s": {
+          "type": "number",
+          "description": "Total Rejects under D/S."
+        },
+        "a_s": {
+          "type": "number",
+          "description": "Total Rejects under A/S."
+        },
+        "total": {
+          "type": "number",
+          "description": "Total Rejects grand total as written. Prefer the written value even if it differs slightly from n_s+d_s+a_s."
+        }
+      }
+    },
+
+    "machine_counter": {
+      "type": "object",
+      "description": "Cast Quantity → Machine Counter Readings (Start / Stop / Machine / EMS Counter).",
+      "properties": {
+        "start": {
+          "type": "object",
+          "description": "Start counter row.",
+          "properties": {
+            "n_s": { "type": "number", "description": "Start counter N/S." },
+            "d_s": { "type": "number", "description": "Start counter D/S." },
+            "a_s": { "type": "number", "description": "Start counter A/S." },
+            "total": { "type": "number", "description": "Start counter Total if present." }
+          }
+        },
+        "stop": {
+          "type": "object",
+          "description": "Stop counter row.",
+          "properties": {
+            "n_s": { "type": "number", "description": "Stop counter N/S." },
+            "d_s": { "type": "number", "description": "Stop counter D/S." },
+            "a_s": { "type": "number", "description": "Stop counter A/S." },
+            "total": { "type": "number", "description": "Stop counter Total if present." }
+          }
+        },
+        "machine": {
+          "type": "object",
+          "description": "Machine count row (typically Stop−Start for the shift).",
+          "properties": {
+            "n_s": { "type": "number", "description": "Machine count N/S." },
+            "d_s": { "type": "number", "description": "Machine count D/S." },
+            "a_s": { "type": "number", "description": "Machine count A/S." },
+            "total": { "type": "number", "description": "Machine count Total as written." }
+          }
+        },
+        "ems_counter": {
+          "type": "object",
+          "description": "EMS Counter row.",
+          "properties": {
+            "n_s": { "type": "number", "description": "EMS Counter N/S." },
+            "d_s": { "type": "number", "description": "EMS Counter D/S." },
+            "a_s": { "type": "number", "description": "EMS Counter A/S." },
+            "total": { "type": "number", "description": "EMS Counter Total if present." }
+          }
+        }
+      }
+    }
+  },
+  "required": ["header", "shifts", "rejects", "total_rejects"]
+}

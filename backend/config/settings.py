@@ -25,7 +25,15 @@ SECRET_KEY = "django-insecure-e4w2lflaem9t=m#_mer*=kfnqy^ijy6767z*40gs=4xhpn%c^f
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False  # Set to False for production
 
-ALLOWED_HOSTS = ['nissanoee.duckdns.org', 'localhost', '127.0.0.1']  # Production domain added
+# Shop-floor / LAN clients on 192.168.2.0/24 (dev servers bind 0.0.0.0).
+LAN_HOSTS = [f'192.168.2.{i}' for i in range(256)]
+
+ALLOWED_HOSTS = [
+    'nissanoee.duckdns.org',
+    'localhost',
+    '127.0.0.1',
+    *LAN_HOSTS,
+]
 
 
 # Application definition
@@ -41,6 +49,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'corsheaders',             # Required to allow React to talk to Django
     'production',              # The app where we defined Machines and Records
+    'ocr',
 ]
 
 REST_FRAMEWORK = {
@@ -64,6 +73,7 @@ REST_FRAMEWORK = {
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -126,19 +136,38 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
+# DEBUG stays False; WhiteNoise serves collected admin/app static files under runserver
+# and gunicorn. Run `manage.py collectstatic` after Django upgrades.
 
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "https://nissanoee.duckdns.org",
+    *[f"http://{host}:5173" for host in LAN_HOSTS],
+]
+
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^http://192\.168\.2\.\d{1,3}:5173$",
 ]
 
 CSRF_TRUSTED_ORIGINS = [
     "https://nissanoee.duckdns.org",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    *[f"http://{host}:5173" for host in LAN_HOSTS],
+    *[f"http://{host}:8000" for host in LAN_HOSTS],
 ]
-
-# Production Static Files
-STATIC_ROOT = BASE_DIR / "staticfiles"
 

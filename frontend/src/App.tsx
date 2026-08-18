@@ -10,7 +10,8 @@ import type {
   PartProductionHistory,
   DowntimeEventHistory
 } from '@/types';
-import { useState, useEffect } from 'react';
+import { matchesShiftRecord } from '@/utils/ocrRecordUtils';
+import { useState, useEffect, useCallback } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Dashboard } from '@/components/Dashboard';
 import { DataEntry } from '@/components/DataEntry';
@@ -22,6 +23,8 @@ import { OperatorManagement } from '@/components/OperatorManagement';
 import { PartManagement } from '@/components/PartManagement';
 import { ReasonManagement } from '@/components/ReasonManagement';
 import { ProductionRecordManagement } from '@/components/ProductionRecordManagement';
+import { OcrImport } from '@/components/ocr/OcrImport';
+import { ReauthDialog } from '@/components/ReauthDialog';
 import { ScheduledDowntimeManagement } from '@/components/ScheduledDowntimeManagement';
 import { Toaster } from '@/components/ui/sonner';
 import { Badge } from '@/components/ui/badge';
@@ -35,6 +38,7 @@ import {
   productionRecordApi, partProductionHistoryApi, downtimeEventHistoryApi,
   addDieToPart, removeDieFromPart
 } from '@/services/api';
+import { cancelReauth } from '@/services/authSession';
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
@@ -45,11 +49,6 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<{ employeeId: string; role: 'operator' | 'manager' } | null>(() => {
     const saved = sessionStorage.getItem('oee-current-user');
     return saved ? JSON.parse(saved) : null;
-  });
-
-  const [loginTimestamp, setLoginTimestamp] = useState<Date>(() => {
-    const saved = sessionStorage.getItem('oee-login-timestamp');
-    return saved ? new Date(saved) : new Date();
   });
 
   const [operators, setOperators] = useState<Operator[]>([]);
@@ -66,48 +65,49 @@ export default function App() {
   const [operatorSetup, setOperatorSetup] = useState<OperatorSetupData | null>(null);
   const [showOperatorSetup, setShowOperatorSetup] = useState(false);
   const [setupMode, setSetupMode] = useState<'new' | 'edit' | 'partcast-change'>('new');
+  const [activeTab, setActiveTab] = useState(
+    currentUser?.role === 'operator' ? 'entry' : 'dashboard',
+  );
 
-  // Load all data from API on authentication
+  const loadData = useCallback(async () => {
+    try {
+      const [
+        ops, pts, mchs,
+        defects, downtimes, processes, schedules,
+        records, partHist, dtHist
+      ] = await Promise.all([
+        operatorApi.getAll(),
+        partApi.getAll(),
+        machineApi.getAll(),
+        defectReasonApi.getAll(),
+        downtimeReasonApi.getAll(),
+        processReasonApi.getAll(),
+        scheduledDowntimeApi.getAll(),
+        productionRecordApi.getAll(),
+        partProductionHistoryApi.getAll(),
+        downtimeEventHistoryApi.getAll(),
+      ]);
+
+      setOperators(ops);
+      setParts(pts);
+      setMachines(mchs);
+      setDefectReasons(defects);
+      setDowntimeReasons(downtimes);
+      setProcessReasons(processes);
+      setScheduledDowntimes(schedules);
+      setProductionRecords(records);
+      setPartProductionHistory(partHist);
+      setDowntimeEventHistory(dtHist);
+    } catch (err) {
+      console.error("Failed to load data from API", err);
+      toast.error("Failed to load data from server. Please check your connection.");
+    }
+  }, []);
+
   useEffect(() => {
     if (!isAuthenticated) return;
-
-    const loadData = async () => {
-      try {
-        const [
-          ops, pts, mchs,
-          defects, downtimes, processes, schedules,
-          records, partHist, dtHist
-        ] = await Promise.all([
-          operatorApi.getAll(),
-          partApi.getAll(),
-          machineApi.getAll(),
-          defectReasonApi.getAll(),
-          downtimeReasonApi.getAll(),
-          processReasonApi.getAll(),
-          scheduledDowntimeApi.getAll(),
-          productionRecordApi.getAll(),
-          partProductionHistoryApi.getAll(),
-          downtimeEventHistoryApi.getAll(),
-        ]);
-
-        setOperators(ops);
-        setParts(pts);
-        setMachines(mchs);
-        setDefectReasons(defects);
-        setDowntimeReasons(downtimes);
-        setProcessReasons(processes);
-        setScheduledDowntimes(schedules);
-        setProductionRecords(records);
-        setPartProductionHistory(partHist);
-        setDowntimeEventHistory(dtHist);
-      } catch (err) {
-        console.error("Failed to load initial data from API", err);
-        toast.error("Failed to load data from server. Please check your connection.");
-      }
-    };
-
     loadData();
-  }, [isAuthenticated]);
+  }, [isAuthenticated, activeTab, loadData]);
 
   const addProductionRecord = async (record: Omit<ProductionRecord, 'id' | 'timestamp'>) => {
     try {
@@ -238,10 +238,16 @@ export default function App() {
 
   const deleteProductionRecord = async (id: string) => {
     try {
+      const record = productionRecords.find(r => r.id === id);
+      if (!record) return;
+
       await productionRecordApi.delete(id);
-      setProductionRecords(productionRecords.filter(r => r.id != id));
+      setProductionRecords(productionRecords.filter(r => r.id !== id));
+      setPartProductionHistory(partProductionHistory.filter(p => !matchesShiftRecord(record, p)));
+      setDowntimeEventHistory(downtimeEventHistory.filter(d => !matchesShiftRecord(record, d)));
+      toast.success('Shift record and related data deleted');
     } catch (e) {
-      toast.error('Failed to delete record');
+      toast.error('Failed to delete shift record');
     }
   };
 
@@ -397,13 +403,10 @@ export default function App() {
 
   const handleLogin = (employeeId: string, role: 'operator' | 'manager') => {
     const user = { employeeId, role };
-    const timestamp = new Date();
     setCurrentUser(user);
-    setLoginTimestamp(timestamp);
     setIsAuthenticated(true);
     sessionStorage.setItem('oee-authenticated', 'true');
     sessionStorage.setItem('oee-current-user', JSON.stringify(user));
-    sessionStorage.setItem('oee-login-timestamp', timestamp.toISOString());
 
     // For operators, show the setup screen after login
     if (role === 'operator') {
@@ -433,13 +436,14 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    cancelReauth('Logged out');
     setIsAuthenticated(false);
     setCurrentUser(null);
     setOperatorSetup(null);
     setShowOperatorSetup(false);
     sessionStorage.removeItem('oee-authenticated');
     sessionStorage.removeItem('oee-current-user');
-    sessionStorage.removeItem('oee-login-timestamp');
+    sessionStorage.removeItem('oee-auth-token');
     toast.success('Logged out successfully');
   };
 
@@ -517,7 +521,7 @@ export default function App() {
     <>
       <div className="min-h-screen bg-[#F1F5F9]">
         <header className="bg-gradient-to-r from-slate-900 to-slate-800 text-white px-6 py-4 shadow-lg">
-          <div className="max-w-7xl mx-auto">
+          <div className="mx-auto w-full max-w-none">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-4">
                 <div className="p-2 bg-blue-600 rounded-lg">
@@ -574,10 +578,14 @@ export default function App() {
           </div>
         </header>
 
-        <main className="max-w-7xl mx-auto px-6 py-8">
-          <Tabs defaultValue={currentUser?.role === 'operator' ? 'entry' : 'dashboard'} className="space-y-6">
+        <main className="mx-auto w-full max-w-none py-8 px-4 sm:px-6">
+          <Tabs
+            value={activeTab}
+            onValueChange={setActiveTab}
+            className="space-y-6"
+          >
             {currentUser?.role === 'manager' ? (
-              <TabsList className="grid w-full grid-cols-8 h-14 shadow-sm border border-slate-200">
+              <TabsList className="grid w-full grid-cols-9 h-14 p-1.5 gap-1">
                 <TabsTrigger value="dashboard" className="text-base h-full">Dashboard</TabsTrigger>
                 <TabsTrigger value="records" className="text-base h-full">Shift Records</TabsTrigger>
                 <TabsTrigger value="history" className="text-base h-full">History</TabsTrigger>
@@ -586,6 +594,7 @@ export default function App() {
                 <TabsTrigger value="parts" className="text-base h-full">Parts</TabsTrigger>
                 <TabsTrigger value="reasons" className="text-base h-full">Reasons</TabsTrigger>
                 <TabsTrigger value="downtime" className="text-base h-full">Scheduled Downtime</TabsTrigger>
+                <TabsTrigger value="ocr" className="text-base h-full">OCR Import</TabsTrigger>
               </TabsList>
             ) : (
               <div className="max-w-2xl">
@@ -602,6 +611,8 @@ export default function App() {
                   <Dashboard
                     machines={machines}
                     productionRecords={productionRecords}
+                    parts={parts}
+                    partProductionHistory={partProductionHistory}
                   />
                 </TabsContent>
 
@@ -614,6 +625,7 @@ export default function App() {
                     parts={parts}
                     defectReasons={defectReasons}
                     onUpdateRecord={updateProductionRecord}
+                    onDeleteRecord={deleteProductionRecord}
                     onAddPartHistory={addPartProductionHistory}
                     onUpdatePartHistory={updatePartProductionHistory}
                     onDeletePartHistory={deletePartProductionHistory}
@@ -645,6 +657,7 @@ export default function App() {
                   <MachineManagement
                     machines={machines}
                     productionRecords={productionRecords}
+                    partProductionHistory={partProductionHistory}
                     parts={parts}
                     onUpdateMachine={updateMachine}
                     onAddMachine={addMachine}
@@ -701,6 +714,10 @@ export default function App() {
                     onDelete={deleteScheduledDowntime}
                   />
                 </TabsContent>
+
+                <TabsContent value="ocr" className="mt-0">
+                  <OcrImport active={activeTab === 'ocr'} />
+                </TabsContent>
               </>
             )}
 
@@ -710,13 +727,13 @@ export default function App() {
                   machines={machines}
                   parts={parts}
                   defectReasons={defectReasons}
+                  downtimeReasons={downtimeReasons}
                   onUpdatePartHistory={updatePartProductionHistory}
                   onAddRecord={addProductionRecord}
                   onUpdateRecord={updateProductionRecord}
                   onAddPartHistory={addPartProductionHistory}
                   onAddDowntimeEvent={addDowntimeEventHistory}
                   currentUser={currentUser}
-                  loginTimestamp={loginTimestamp}
                   operatorSetup={operatorSetup || undefined}
                   onEditSetup={handleEditSetup}
                   onCheckOff={handleCheckOff}
@@ -726,6 +743,7 @@ export default function App() {
           </Tabs>
         </main>
       </div>
+      <ReauthDialog onLogout={handleLogout} />
       <Toaster />
     </>
   );

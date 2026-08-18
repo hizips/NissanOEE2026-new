@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>PR-FO-4623 Daily Production Sheet (blank)</title>
+<style>
+  @page { size: A4 landscape; margin: 8mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 8.5px;
+    color: #111;
+    margin: 0;
+    background: #fff;
+  }
+  .sheet {
+    width: 277mm;
+    min-height: 190mm;
+    margin: 0 auto;
+  }
+  h1 {
+    text-align: center;
+    font-size: 16px;
+    letter-spacing: 1px;
+    margin: 0 0 4px;
+  }
+  .hpdc {
+    float: right;
+    border: 1.5px solid #000;
+    padding: 2px 10px;
+    font-weight: 700;
+    font-size: 12px;
+    margin-top: -22px;
+  }
+  .header {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr 1.1fr 0.7fr 0.9fr;
+    gap: 6px;
+    margin: 6px 0 8px;
+    clear: both;
+  }
+  .header label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 700;
+  }
+  .cell {
+    border-bottom: 1px solid #000;
+    min-height: 14px;
+    min-width: 48px;
+    flex: 1;
+    padding: 1px 3px;
+  }
+  .cell[data-field]::after { content: ""; }
+
+  .main {
+    display: grid;
+    grid-template-columns: 1.55fr 0.08fr 0.95fr;
+    gap: 0;
+    border: 1.5px solid #000;
+  }
+  .vline {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    text-align: center;
+    font-weight: 700;
+    font-size: 9px;
+    letter-spacing: 1px;
+    border-left: 1px solid #000;
+    border-right: 1px solid #000;
+    padding: 6px 2px;
+    background: #f3f3f3;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+  th, td {
+    border: 1px solid #333;
+    padding: 1px 2px;
+    vertical-align: middle;
+    height: 13px;
+  }
+  th { background: #eee; font-weight: 700; text-align: center; }
+  .left th { font-size: 7.5px; }
+  .reason { text-align: left; }
+  .num { text-align: center; width: 22px; }
+  .tiny { font-size: 7px; line-height: 1.1; }
+  .shift-banner {
+    background: #ddd;
+    font-weight: 700;
+    text-align: left;
+  }
+  .shift-meta td { background: #fafafa; }
+  .right h3 {
+    margin: 0;
+    padding: 2px;
+    font-size: 9px;
+    background: #ddd;
+    border-bottom: 1px solid #000;
+    text-align: center;
+  }
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 6px;
+    font-size: 8px;
+  }
+  .empty { min-height: 12px; }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <div class="hpdc" data-field="process">HPDC</div>
+  <h1>DAILY PRODUCTION SHEET</h1>
+
+  <div class="header">
+    <label>Machine : <span class="cell" data-field="header.machine"></span></label>
+    <label>Product : <span class="cell" data-field="header.product"></span></label>
+    <label>Shot Sleeve # <span class="cell" data-field="header.shot_sleeve"></span></label>
+    <label>Die # : <span class="cell" data-field="header.die_number"></span></label>
+    <label>Date : <span class="cell" data-field="header.date"></span></label>
+  </div>
+
+  <div class="main">
+    <!-- LEFT: Downtime -->
+    <div class="left">
+      <table>
+        <thead>
+          <tr>
+            <th rowspan="2" style="width:28%">Reasons For Downtime</th>
+            <th rowspan="2" class="tiny" style="width:7%">Maint Or<br/>T/Room<br/>Sign</th>
+            <th colspan="4" class="tiny">Time</th>
+            <th rowspan="2" class="tiny" style="width:6%">Warm<br/>Up<br/>Prod</th>
+            <th colspan="5" class="tiny">Downtime In Minutes</th>
+          </tr>
+          <tr>
+            <th class="tiny">M/C Stop</th>
+            <th class="tiny">Maint / Start</th>
+            <th class="tiny">T/Room Finish</th>
+            <th class="tiny">M/C Start</th>
+            <th class="tiny">Maint</th>
+            <th class="tiny">Tool</th>
+            <th class="tiny">Eng</th>
+            <th class="tiny">Prod</th>
+            <th class="tiny">Other</th>
+          </tr>
+        </thead>
+        <tbody id="downtime-body">
+          <!-- filled by script below for N/S D/S A/S -->
+        </tbody>
+      </table>
+    </div>
+
+    <div class="vline">Labour / Reject Data / Cast Quantity</div>
+
+    <!-- RIGHT -->
+    <div class="right">
+      <h3>Labour</h3>
+      <table>
+        <tr><th></th><th>N/S</th><th>D/S</th><th>A/S</th></tr>
+        <tr>
+          <td>Support</td>
+          <td class="empty" data-field="labour.support.n_s"></td>
+          <td class="empty" data-field="labour.support.d_s"></td>
+          <td class="empty" data-field="labour.support.a_s"></td>
+        </tr>
+        <tr>
+          <td>Operator</td>
+          <td class="empty" data-field="labour.operator.n_s"></td>
+          <td class="empty" data-field="labour.operator.d_s"></td>
+          <td class="empty" data-field="labour.operator.a_s"></td>
+        </tr>
+        <tr>
+          <td>Relief Operator</td>
+          <td class="empty" data-field="labour.relief.n_s"></td>
+          <td class="empty" data-field="labour.relief.d_s"></td>
+          <td class="empty" data-field="labour.relief.a_s"></td>
+        </tr>
+      </table>
+
+      <h3>Reject Data</h3>
+      <table id="rejects-table">
+        <tr><th style="width:46%">Reason</th><th>N/S</th><th>D/S</th><th>A/S</th><th>Total</th></tr>
+      </table>
+
+      <h3>Cast Quantity — Machine Counter Readings</h3>
+      <table>
+        <tr><th></th><th>N/S</th><th>D/S</th><th>A/S</th><th>Total</th></tr>
+        <tr>
+          <td>Start</td>
+          <td class="empty" data-field="machine_counter.start.n_s"></td>
+          <td class="empty" data-field="machine_counter.start_d_s"></td>
+          <td class="empty" data-field="machine_counter.start_a_s"></td>
+          <td class="empty" data-field="machine_counter.start.total"></td>
+        </tr>
+        <tr>
+          <td>Stop</td>
+          <td class="empty" data-field="machine_counter.stop.n_s"></td>
+          <td class="empty" data-field="machine_counter.stop_d_s"></td>
+          <td class="empty" data-field="machine_counter.stop_a_s"></td>
+          <td class="empty" data-field="machine_counter.stop.total"></td>
+        </tr>
+        <tr>
+          <td>Machine</td>
+          <td class="empty" data-field="machine_counter.machine.n_s"></td>
+          <td class="empty" data-field="machine_counter.machine_d_s"></td>
+          <td class="empty" data-field="machine_counter.machine_a_s"></td>
+          <td class="empty" data-field="machine_counter.machine_total"></td>
+        </tr>
+        <tr>
+          <td>EMS Counter</td>
+          <td class="empty" data-field="machine_counter.ems.n_s"></td>
+          <td class="empty" data-field="machine_counter.ems.d_s"></td>
+          <td class="empty" data-field="machine_counter.ems.a_s"></td>
+          <td class="empty" data-field="machine_counter.ems.total"></td>
+        </tr>
+      </table>
+
+      <h3>Rework / Minor Stops</h3>
+      <table>
+        <tr><td>Impregnation</td><td class="empty" data-field="rework.impregnation" colspan="3"></td></tr>
+        <tr><td>Re Leak Test</td><td class="empty" data-field="rework.re_leak_test" colspan="3"></td></tr>
+        <tr><td>No Of Stops</td><td class="empty" data-field="minor_stops.count" colspan="3"></td></tr>
+        <tr><td>Time In Min</td><td class="empty" data-field="minor_stops.time_min" colspan="3"></td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="footer">
+    <div>Document ID: <strong data-field="header.document_id">PR-FO-4623</strong></div>
+    <div>Date: 16/10/2017</div>
+    <div>Tan Nguyen</div>
+  </div>
+</div>
+
+<script>
+const REJECTS = [
+  "Drag","Crack","Leaker","Warmup","Hand. Damage","Trim Damage","Robot Damage",
+  "Misrun","Gate Break","Broken Biscuit","Short Biscuit","Blister","Porosity",
+  "Chipping","Distortion","Soldering","Laser issues","Stain","Broken C' Pin","Dropped in PIT"
+];
+const SHIFTS = ["N/S", "D/S", "A/S"];
+const ROWS = 7;
+
+function shiftBlock(shift, idx) {
+  const sid = shift.replace("/", "_");
+  let html = "";
+  html += `<tr class="shift-banner"><td colspan="12">${shift} :- &nbsp; Plunger Tip Life Count: <span class="cell" style="display:inline-block;min-width:40px" data-field="shift_summaries.${idx}.plunger_tip_life_count"></span> &nbsp; Vacuum Valve # <span class="cell" style="display:inline-block;min-width:40px" data-field="shift_summaries.${idx}.vacuum_valve"></span></td></tr>`;
+  html += `<tr class="shift-meta"><td colspan="12" class="tiny">
+    LAZER MARK START: <span class="cell" style="display:inline-block;min-width:36px" data-field="shift_summaries.${idx}.lazer_mark_start"></span>
+    FINISH: <span class="cell" style="display:inline-block;min-width:36px" data-field="shift_summaries.${idx}.lazer_mark_finish"></span>
+    &nbsp; MEETINGS: <span class="cell" style="display:inline-block;min-width:28px" data-field="shift_summaries.${idx}.meetings_minutes"></span>
+    POLISH: <span class="cell" style="display:inline-block;min-width:28px" data-field="shift_summaries.${idx}.polish_minutes"></span>
+    CHK LIST: <span class="cell" style="display:inline-block;min-width:28px" data-field="shift_summaries.${idx}.chk_list_minutes"></span>
+    C/UP, FILTERS, WATER: <span class="cell" style="display:inline-block;min-width:28px" data-field="shift_summaries.${idx}.cleanup_minutes"></span>
+  </td></tr>`;
+  for (let r = 0; r < ROWS; r++) {
+    const p = `downtime_entries.${sid}.${r}`;
+    html += `<tr>
+      <td class="reason empty" data-field="${p}.reason"></td>
+      <td class="empty" data-field="${p}.sign"></td>
+      <td class="empty" data-field="${p}.mc_stop"></td>
+      <td class="empty" data-field="${p}.maint_start"></td>
+      <td class="empty" data-field="${p}.troom_finish"></td>
+      <td class="empty" data-field="${p}.mc_start"></td>
+      <td class="empty" data-field="${p}.warmup_prod_minutes"></td>
+      <td class="empty" data-field="${p}.maint_minutes"></td>
+      <td class="empty" data-field="${p}.tool_minutes"></td>
+      <td class="empty" data-field="${p}.eng_minutes"></td>
+      <td class="empty" data-field="${p}.prod_minutes"></td>
+      <td class="empty" data-field="${p}.other_minutes"></td>
+    </tr>`;
+  }
+  return html;
+}
+
+const body = document.getElementById("downtime-body");
+body.innerHTML = SHIFTS.map((s, i) => shiftBlock(s, i)).join("");
+
+const rt = document.getElementById("rejects-table");
+REJECTS.forEach((reason, i) => {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td>${reason}</td>
+    <td class="empty" data-field="rejects.${i}.n_s"></td>
+    <td class="empty" data-field="rejects.${i}.d_s"></td>
+    <td class="empty" data-field="rejects.${i}.a_s"></td>
+    <td class="empty" data-field="rejects.${i}.total"></td>`;
+  // store reason as data attr for stuffing
+  tr.querySelector("td").setAttribute("data-field", `rejects.${i}.reason`);
+  tr.querySelector("td").setAttribute("data-fixed", reason);
+  rt.appendChild(tr);
+});
+const tot = document.createElement("tr");
+tot.innerHTML = `
+  <td><strong>Total Rejects</strong></td>
+  <td class="empty" data-field="total_rejects.n_s"></td>
+  <td class="empty" data-field="total_rejects.d_s"></td>
+  <td class="empty" data-field="total_rejects.a_s"></td>
+  <td class="empty" data-field="total_rejects.total"></td>`;
+rt.appendChild(tot);
+
+const qa = document.createElement("tr");
+qa.innerHTML = `
+  <td>Test / QA</td>
+  <td class="empty" data-field="test_qa.n_s"></td>
+  <td class="empty" data-field="test_qa.d_s"></td>
+  <td class="empty" data-field="test_qa.a_s"></td>
+  <td class="empty" data-field="test_qa.total"></td>`;
+rt.insertBefore(qa, tot);
+</script>
+
+<script>
+(function() {
+  const DATA = {"header.machine": "1250#2", "header.product": "ZV9", "header.shot_sleeve": "203", "header.die_number": "5", "header.date": "9-5-25", "shift_summaries.1.plunger_tip_life_count": "1243", "shift_summaries.1.meetings_minutes": "10", "shift_summaries.1.polish_minutes": "20", "shift_summaries.1.chk_list_minutes": "5", "shift_summaries.1.cleanup_minutes": "5", "shift_summaries.2.plunger_tip_life_count": "1361", "shift_summaries.2.lazer_mark_finish": "428", "shift_summaries.2.meetings_minutes": "20", "shift_summaries.2.polish_minutes": "15", "downtime_entries.D_S.0.reason": "MEETINGS: 10 POLISH: 20 CHK LIST: 5 C/UP, FILTERS, WATER: 5", "downtime_entries.D_S.0.sign": "M-A", "downtime_entries.D_S.0.mc_stop": "6:40", "downtime_entries.D_S.0.maint_start": "7:20", "downtime_entries.D_S.0.warmup_prod_minutes": "4", "downtime_entries.D_S.1.reason": "Lump on casting", "downtime_entries.D_S.1.sign": "M-A", "downtime_entries.D_S.1.mc_stop": "7:50", "downtime_entries.D_S.1.maint_start": "7:50", "downtime_entries.D_S.1.mc_start": "8:30", "downtime_entries.D_S.1.warmup_prod_minutes": "3", "downtime_entries.D_S.1.tool_minutes": "40", "downtime_entries.D_S.2.reason": "Biscuit Broken", "downtime_entries.D_S.2.sign": "M-A", "downtime_entries.D_S.2.mc_stop": "9:00", "downtime_entries.D_S.2.mc_start": "9:05", "downtime_entries.D_S.2.warmup_prod_minutes": "2", "downtime_entries.D_S.2.prod_minutes": "5", "downtime_entries.D_S.3.reason": "Biscuit Broken die Flashing", "downtime_entries.D_S.3.sign": "M-A", "downtime_entries.D_S.3.mc_stop": "9:45", "downtime_entries.D_S.3.mc_start": "9:50", "downtime_entries.D_S.3.warmup_prod_minutes": "2", "downtime_entries.D_S.3.prod_minutes": "5", "downtime_entries.D_S.4.reason": "Trim Process Fault", "downtime_entries.D_S.4.sign": "M-A", "downtime_entries.D_S.4.mc_stop": "10:10", "downtime_entries.D_S.4.mc_start": "10:15", "downtime_entries.D_S.4.warmup_prod_minutes": "2", "downtime_entries.D_S.4.prod_minutes": "5", "downtime_entries.D_S.5.reason": "metal finished cleaning", "downtime_entries.D_S.5.sign": "M-A", "downtime_entries.D_S.5.mc_stop": "11:05", "downtime_entries.D_S.5.mc_start": "13:20", "downtime_entries.D_S.5.warmup_prod_minutes": "3", "downtime_entries.D_S.5.other_minutes": "135", "downtime_entries.D_S.6.sign": "M-A", "downtime_entries.D_S.6.mc_stop": "14:25", "downtime_entries.D_S.6.mc_start": "14:40", "downtime_entries.D_S.6.other_minutes": "15", "downtime_entries.A_S.0.reason": "Die lift up - Blend back", "downtime_entries.A_S.0.sign": "RE", "downtime_entries.A_S.0.mc_stop": "15:25", "downtime_entries.A_S.0.maint_start": "15:30", "downtime_entries.A_S.0.mc_start": "16:00", "downtime_entries.A_S.0.warmup_prod_minutes": "4", "downtime_entries.A_S.0.tool_minutes": "10", "downtime_entries.A_S.1.reason": "EXTRACTOR FAULT", "downtime_entries.A_S.1.sign": "SP", "downtime_entries.A_S.1.mc_stop": "17:40", "downtime_entries.A_S.1.mc_start": "17:50", "downtime_entries.A_S.1.warmup_prod_minutes": "2", "downtime_entries.A_S.1.tool_minutes": "40", "downtime_entries.A_S.2.reason": "B-B (SHORT SHOT)", "downtime_entries.A_S.2.sign": "SP", "downtime_entries.A_S.2.mc_stop": "18:25", "downtime_entries.A_S.2.mc_start": "18:35", "downtime_entries.A_S.2.warmup_prod_minutes": "2", "downtime_entries.A_S.2.prod_minutes": "10", "rejects.0.reason": "Drag", "rejects.1.reason": "Crack", "rejects.2.reason": "Leaker", "rejects.3.reason": "Warmup", "rejects.3.d_s": "16", "rejects.3.a_s": "15", "rejects.3.total": "31", "rejects.4.reason": "Hand. Damage", "rejects.5.reason": "Trim Damage", "rejects.6.reason": "Robot Damage", "rejects.7.reason": "Misrun", "rejects.7.d_s": "1", "rejects.7.a_s": "2", "rejects.7.total": "3", "rejects.8.reason": "Gate Break", "rejects.8.a_s": "3", "rejects.8.total": "3", "rejects.9.reason": "Broken Biscuit", "rejects.9.a_s": "3", "rejects.9.total": "3", "rejects.10.reason": "Short Biscuit", "rejects.11.reason": "Blister", "rejects.12.reason": "Porosity", "rejects.13.reason": "Chipping", "rejects.14.reason": "Distortion", "rejects.15.reason": "Soldering", "rejects.16.reason": "Laser issues", "rejects.16.d_s": "2", "rejects.16.total": "2", "rejects.17.reason": "Stain", "rejects.18.reason": "Broken C' Pin", "rejects.19.reason": "Dropped in PIT", "total_rejects.d_s": "19", "total_rejects.a_s": "23", "total_rejects.total": "42", "machine_counter.start_d_s": "7423", "machine_counter.start_a_s": "7541", "machine_counter.stop_d_s": "7541", "machine_counter.stop_a_s": "7751", "machine_counter.machine_d_s": "118", "machine_counter.machine_a_s": "210", "machine_counter.machine_total": "328"};
+  function apply() {
+    document.querySelectorAll('[data-field]').forEach(el => {
+      const key = el.getAttribute('data-field');
+      if (Object.prototype.hasOwnProperty.call(DATA, key)) {
+        el.textContent = DATA[key];
+      }
+    });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => setTimeout(apply, 0));
+  } else {
+    setTimeout(apply, 0);
+  }
+})();
+</script>
+</body>
+</html>
