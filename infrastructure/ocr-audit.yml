@@ -1,0 +1,257 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  OCR object audit trail - records production S3 data events in encrypted CloudTrail and CloudWatch destinations
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: OCR S3 data events -> CloudTrail -> retained KMS-encrypted S3 + CloudWatch Logs
+    must:
+      - Never record or expose object contents or application secrets
+      - Keep audit destinations private, encrypted, and retained
+    ref:
+      - at: AWS_DEPLOYMENT.md
+        has: audit deployment order and cost note
+        scope: repository
+
+Parameters:
+  OcrBucketName:
+    Type: String
+    MinLength: 3
+    Description: Existing private OCR artifact bucket name
+  OcrPrefix:
+    Type: String
+    Default: prod/ocr
+    AllowedPattern: '^[A-Za-z0-9!_.*()/-]+$'
+    Description: Production OCR prefix to audit
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    AllowedValues: [30, 60, 90, 120, 180, 365]
+
+Resources:
+  AuditKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: isolates encryption of CloudTrail audit evidence and CloudWatch copies from application data keys
+        must:
+          - Enable rotation
+          - Retain on stack deletion or replacement
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      Description: KMS key for Nissan OEE OCR audit logs
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: kms:*
+            Resource: '*'
+          - Sid: CloudTrailEncryption
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-ocr-data-events'
+              StringLike:
+                kms:EncryptionContext:aws:cloudtrail:arn: !Sub 'arn:${AWS::Partition}:cloudtrail:*:${AWS::AccountId}:trail/*'
+          - Sid: CloudWatchLogsEncryption
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/cloudtrail/${AWS::StackName}'
+
+  AuditLogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: retained system of record for object-level access and mutation evidence
+        must:
+          - Block public access and deny non-TLS requests
+          - Retain evidence when stack is removed
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt AuditKey.Arn
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveAuditLogs
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  AuditLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: permits only this trail to deliver evidence and rejects plaintext transport
+        must:
+          - Scope CloudTrail writes by source ARN and account prefix
+          - Keep aws:SecureTransport deny
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      Bucket: !Ref AuditLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt AuditLogBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-ocr-data-events'
+          - Sid: CloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${AuditLogBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-ocr-data-events'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt AuditLogBucket.Arn
+              - !Sub '${AuditLogBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  AuditLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: searchable near-real-time copy of OCR object activity for investigation and alarms
+        must:
+          - Encrypt with AuditKey
+          - Retain on stack deletion
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      LogGroupName: !Sub '/aws/cloudtrail/${AWS::StackName}'
+      KmsKeyId: !GetAtt AuditKey.Arn
+      RetentionInDays: !Ref LogRetentionDays
+
+  CloudTrailLogsRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: lets only this CloudTrail trail publish events to its dedicated log group
+        must:
+          - Scope write permission to AuditLogGroup
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-ocr-data-events'
+      Policies:
+        - PolicyName: WriteAuditEvents
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt AuditLogGroup.Arn
+
+  OcrDataTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: AuditLogBucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: provides object-level evidence for production OCR reads, writes, and deletes
+        must:
+          - Audit only the production OCR prefix to contain data-event cost
+          - Deliver to both retained S3 and searchable CloudWatch Logs
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      TrailName: !Sub '${AWS::StackName}-ocr-data-events'
+      S3BucketName: !Ref AuditLogBucket
+      KMSKeyId: !GetAtt AuditKey.Arn
+      IsLogging: true
+      IncludeGlobalServiceEvents: false
+      IsMultiRegionTrail: false
+      EnableLogFileValidation: true
+      CloudWatchLogsLogGroupArn: !GetAtt AuditLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt CloudTrailLogsRole.Arn
+      EventSelectors:
+        - IncludeManagementEvents: false
+          ReadWriteType: All
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub 'arn:${AWS::Partition}:s3:::${OcrBucketName}/${OcrPrefix}/'
+
+Outputs:
+  TrailArn:
+    Description: CloudTrail ARN for OCR S3 data events
+    Value: !GetAtt OcrDataTrail.Arn
+  AuditLogBucketName:
+    Description: Retained encrypted audit-log bucket
+    Value: !Ref AuditLogBucket
+  AuditLogGroupName:
+    Description: Searchable CloudWatch Logs destination
+    Value: !Ref AuditLogGroup

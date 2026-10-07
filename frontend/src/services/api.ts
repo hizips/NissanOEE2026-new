@@ -180,9 +180,23 @@ const mapResponseForFrontend = (data: any) => {
   return mapped;
 };
 
+type QueryParameters = Record<string, string | number | boolean | null | undefined>;
+
+const endpointWithQuery = (endpoint: string, parameters?: QueryParameters) => {
+  if (!parameters) return endpoint;
+  const query = new URLSearchParams();
+  Object.entries(parameters).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      query.set(key, String(value));
+    }
+  });
+  const queryString = query.toString();
+  return queryString ? `${endpoint}?${queryString}` : endpoint;
+};
+
 const createCrudApi = (baseEndpoint: string) => ({
-  getAll: async () => {
-    const res = await fetchClient(baseEndpoint);
+  getAll: async (parameters?: QueryParameters) => {
+    const res = await fetchClient(endpointWithQuery(baseEndpoint, parameters));
     return Array.isArray(res) ? res.map(mapResponseForFrontend) : res;
   },
   getById: async (id: string | number) => {
@@ -225,7 +239,10 @@ export const processReasonApi = createCrudApi('/process-reasons/');
 export const scheduledDowntimeApi = createCrudApi('/scheduled-downtimes/');
 export const partProductionHistoryApi = createCrudApi('/part-production-history/');
 export const downtimeEventHistoryApi = createCrudApi('/downtime-event-history/');
-export const productionRecordApi = createCrudApi('/records/');
+export const productionRecordApi = {
+  ...createCrudApi('/records/'),
+  getDateBounds: () => fetchClient('/records/date-bounds/') as Promise<{ min: string | null; max: string | null }>,
+};
 
 /**
  * Creates a new Die in the database, then PATCHes the Part to include it.
@@ -260,4 +277,3 @@ export const removeDieFromPart = async (partId: string, currentDieIds: string[],
   });
   return mapResponseForFrontend(updatedPart);
 };
-

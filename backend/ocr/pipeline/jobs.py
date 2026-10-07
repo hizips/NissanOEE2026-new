@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import queue
 import re
 import secrets
@@ -16,11 +17,11 @@ from pathlib import Path
 
 from django.conf import settings
 
-from ocr.paths import ALIAS_DIR, JOBS_DIR, SCRIPTS_DIR
+from ocr.paths import ALIAS_DIR, JOBS_DIR, SCRIPTS_DIR, UPLOADS_DIR
+from ocr.storage import get_store
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from deskew import render_pdf_page  # noqa: E402
 from dual_extract import (  # noqa: E402
     DOWNTIME_SCHEMA,
     REJECTS_SCHEMA,
@@ -33,6 +34,7 @@ from ocr_pipeline import CONVERT_MODES, EXTRACT_MODES, run_convert  # noqa: E402
 from sheet_form import canonicalize_machine_name, form_template, normalize_merged  # noqa: E402
 
 _lock = threading.Lock()
+_reconcile_lock = threading.Lock()
 
 DEFAULT_CONVERT_MODE = "accurate"
 DEFAULT_EXTRACTION_MODE = "fast"
@@ -84,7 +86,16 @@ def _sync_db_record(job_dir: Path, meta: dict) -> None:
     record.display_name = meta.get('name') or folder
     record.ocr_status = meta.get('status') or record.ocr_status
     record.ocr_stage = meta.get('stage') or ''
-    record.save(update_fields=['display_name', 'ocr_status', 'ocr_stage', 'updated_at'])
+    record.metadata = {**meta, 'id': folder}
+    record.save(
+        update_fields=[
+            'display_name',
+            'ocr_status',
+            'ocr_stage',
+            'metadata',
+            'updated_at',
+        ]
+    )
 
 
 def _delete_db_record(folder_name: str) -> None:
@@ -142,9 +153,27 @@ def write_meta(job_dir: Path, meta: dict) -> None:
     )
 
 
+def _job_prefix(job_id: str) -> str:
+    return f"jobs/{Path(job_id).name}"
+
+
+def _sync_meta(job_dir: Path) -> None:
+    """Persist the small job checkpoint without re-uploading immutable artifacts."""
+    get_store().put_json(f"{_job_prefix(job_dir.name)}/meta.json", read_meta(job_dir))
+
+
+def _sync_artifact(job_dir: Path, path: Path) -> None:
+    """Upload one changed job artifact."""
+    relative = path.resolve().relative_to(job_dir.resolve()).as_posix()
+    if relative in {'input.pdf', 'original.png', 'source.pdf'}:
+        return
+    get_store().put_file(f"{_job_prefix(job_dir.name)}/{relative}", path)
+
+
 def _set_alias(old_id: str, new_id: str) -> None:
     ALIAS_DIR.mkdir(parents=True, exist_ok=True)
     (ALIAS_DIR / old_id).write_text(new_id, encoding="utf-8")
+    get_store().put_text(f"jobs/.aliases/{old_id}", new_id)
 
 
 def resolve_job_id(job_id: str) -> str:
@@ -153,10 +182,14 @@ def resolve_job_id(job_id: str) -> str:
     current = Path(job_id).name
     while current not in seen:
         seen.add(current)
-        alias = ALIAS_DIR / current
-        if not alias.is_file():
+        from ocr.models import OcrJobRecord
+
+        if OcrJobRecord.objects.filter(folder_name=current).exists():
             break
-        current = alias.read_text(encoding="utf-8").strip() or current
+        alias_key = f"jobs/.aliases/{current}"
+        if not get_store().exists(alias_key):
+            break
+        current = get_store().get_text(alias_key).strip() or current
     return current
 
 
@@ -164,15 +197,12 @@ def all_ids_for_job(job_id: str) -> list[str]:
     """Current folder name plus any alias names that resolve to it."""
     current = resolve_job_id(job_id)
     ids = {current, Path(job_id).name}
-    if ALIAS_DIR.is_dir():
-        for alias in ALIAS_DIR.iterdir():
-            if not alias.is_file():
-                continue
-            try:
-                if resolve_job_id(alias.name) == current:
-                    ids.add(alias.name)
-            except OSError:
-                pass
+    for alias in get_store().list_alias_ids():
+        try:
+            if resolve_job_id(alias) == current:
+                ids.add(alias)
+        except OSError:
+            pass
     return [i for i in ids if i]
 
 
@@ -196,19 +226,27 @@ def retarget_imported_records(old_id: str, new_id: str) -> None:
 
 
 def list_jobs() -> list[dict]:
-    jobs = []
-    if not JOBS_DIR.is_dir():
+    from ocr.models import OcrJobRecord
+
+    records = list(OcrJobRecord.objects.all())
+    jobs = [dict(record.metadata) for record in records if record.metadata]
+    if jobs and len(jobs) == len(records):
+        jobs.sort(key=lambda m: m.get("created_at") or "", reverse=True)
         return jobs
-    for child in JOBS_DIR.iterdir():
-        if not child.is_dir() or child.name.startswith("."):
-            continue
-        if not _meta_path(child).is_file():
-            continue
+
+    # One-time compatibility import for jobs created before metadata was cached in DB.
+    jobs = []
+    store = get_store()
+    for job_id in store.list_job_ids():
         try:
-            meta = read_meta(child)
-        except (OSError, json.JSONDecodeError):
+            meta = store.get_json(f"jobs/{job_id}/meta.json")
+        except (OSError, ValueError, json.JSONDecodeError):
             continue
-        meta["id"] = child.name
+        meta["id"] = job_id
+        job_dir = JOBS_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        write_meta(job_dir, meta)
+        _sync_db_record(job_dir, meta)
         jobs.append(meta)
     jobs.sort(key=lambda m: m.get("created_at") or "", reverse=True)
     return jobs
@@ -217,31 +255,59 @@ def list_jobs() -> list[dict]:
 def get_job_dir(job_id: str) -> Path:
     safe = resolve_job_id(job_id)
     path = (JOBS_DIR / safe).resolve()
-    if path.parent != JOBS_DIR.resolve() or not path.is_dir():
+    if path.parent != JOBS_DIR.resolve():
         raise FileNotFoundError(job_id)
+    get_store().download_prefix(_job_prefix(safe), path)
     return path
 
 
+def get_job_meta(job_id: str) -> dict:
+    from ocr.models import OcrJobRecord
+
+    safe = resolve_job_id(job_id)
+    record = OcrJobRecord.objects.filter(folder_name=safe).first()
+    if record and record.metadata:
+        return {**record.metadata, 'id': safe}
+    meta = get_store().get_json(f"jobs/{safe}/meta.json")
+    meta['id'] = safe
+    path = JOBS_DIR / safe
+    path.mkdir(parents=True, exist_ok=True)
+    write_meta(path, meta)
+    _sync_db_record(path, meta)
+    return meta
+
+
 def create_job(
-    pdf_bytes: bytes,
     original_filename: str,
     *,
+    source_key: str,
+    source_sha256: str,
+    source_page_count: int,
     convert_mode: str = DEFAULT_CONVERT_MODE,
     extraction_mode: str = DEFAULT_EXTRACTION_MODE,
     page: int | None = None,
     upload_id: str | None = None,
+    request_id: str | None = None,
+    job_id: str | None = None,
 ) -> dict:
     convert_mode = normalize_convert_mode(convert_mode)
     extraction_mode = normalize_extraction_mode(extraction_mode)
+    store = get_store()
     with _lock:
-        job_id = random_job_name()
-        while (JOBS_DIR / job_id).exists():
+        job_id = job_id or random_job_name()
+        if request_id:
+            from ocr.models import OcrJobRecord
+
+            record = OcrJobRecord.objects.filter(folder_name=job_id).first()
+            if record and record.metadata:
+                existing = {**record.metadata, "id": job_id}
+                if existing.get("request_id") != request_id:
+                    raise ValueError("OCR request ID conflicts with an existing job")
+                return existing
+        while not request_id and store.exists(f"jobs/{job_id}/meta.json"):
             job_id = random_job_name()
         job_dir = JOBS_DIR / job_id
-        job_dir.mkdir(parents=True)
-
-    pdf_path = job_dir / "input.pdf"
-    pdf_path.write_bytes(pdf_bytes)
+        job_dir.mkdir(parents=True, exist_ok=True)
 
     label = original_filename
     if page is not None:
@@ -256,6 +322,12 @@ def create_job(
         "source_filename": original_filename,
         "page": page,
         "upload_id": upload_id,
+        "request_id": request_id,
+        "source_key": source_key,
+        "source_sha256": source_sha256,
+        "source_page_count": source_page_count,
+        "has_pdf": True,
+        "pdf_page": page or 1,
         "convert_mode": convert_mode,
         "extraction_mode": extraction_mode,
         "created_at": _utc_now(),
@@ -268,11 +340,19 @@ def create_job(
         "checkpoint_id": None,
         "cost_cents": None,
         "cost_breakdown": None,
-        "has_original_png": False,
         "has_extract_png": False,
         "has_merged_json": False,
     }
     write_meta(job_dir, meta)
+    created = store.put_json_if_absent(f"jobs/{job_id}/meta.json", meta)
+    if not created:
+        existing = store.get_json(f"jobs/{job_id}/meta.json")
+        if request_id and existing.get("request_id") != request_id:
+            raise ValueError("OCR request ID conflicts with an existing job")
+        existing["id"] = job_id
+        write_meta(job_dir, existing)
+        _sync_db_record(job_dir, existing)
+        return existing
     _sync_db_record(job_dir, meta)
     return meta
 
@@ -282,36 +362,47 @@ def _update(job_dir: Path, **fields) -> dict:
         meta = read_meta(job_dir)
         meta.update(fields)
         write_meta(job_dir, meta)
+        if meta.get('status') in {'done', 'failed'}:
+            _sync_meta(job_dir)
         _sync_db_record(job_dir, meta)
         return meta
 
 
 def _rename_job_folder(job_dir: Path, display_name: str) -> Path:
-    """Rename folder to date__machine__product__die; keep uniqueness + alias."""
-    old_id = job_dir.name
-    base = folder_slug(display_name)
-    target = JOBS_DIR / base
-    if target.resolve() == job_dir.resolve():
-        return job_dir
-    if target.exists():
-        suffix = secrets.token_hex(2)
-        target = JOBS_DIR / f"{base}_{suffix}"
-    with _lock:
-        job_dir.rename(target)
-        _set_alias(old_id, target.name)
-        from ocr.models import OcrJobRecord
+    """Keep the immutable job id; the extracted name is display metadata only."""
+    return job_dir
 
-        OcrJobRecord.objects.filter(folder_name=old_id).update(folder_name=target.name)
-    retarget_imported_records(old_id, target.name)
-    return target
+
+def _materialize_input_pdf(job_dir: Path, meta: dict) -> Path:
+    """Create the disposable one-page OCR input from the durable source PDF."""
+    input_pdf = job_dir / 'input.pdf'
+    if input_pdf.is_file():
+        return input_pdf
+
+    source_key = meta.get('source_key')
+    if not source_key:
+        raise FileNotFoundError(f"No PDF source is available for {job_dir.name}")
+
+    source_pdf = job_dir / 'source.pdf'
+    get_store().download_file(str(source_key), source_pdf)
+    page = int(meta.get('page') or 1)
+    page_count = int(meta.get('source_page_count') or 1)
+    if page == 1 and page_count == 1:
+        shutil.copyfile(source_pdf, input_pdf)
+    else:
+        from ocr.pipeline.uploads import extract_pdf_page
+
+        extract_pdf_page(source_pdf, page, input_pdf)
+    source_pdf.unlink(missing_ok=True)
+    return input_pdf
 
 
 def run_job(job_id: str) -> None:
     job_dir = get_job_dir(job_id)
     try:
         api_key = require_api_key(settings.BASE_DIR)
-        pdf_path = job_dir / "input.pdf"
         meta0 = read_meta(job_dir)
+        pdf_path = _materialize_input_pdf(job_dir, meta0)
         convert_mode = normalize_convert_mode(meta0.get("convert_mode"))
         extraction_mode = normalize_extraction_mode(meta0.get("extraction_mode"))
         started_at = meta0.get("started_at") or _utc_now()
@@ -319,17 +410,12 @@ def run_job(job_id: str) -> None:
         _update(
             job_dir,
             status="running",
-            stage="rendering_original",
+            stage="converting",
             error=None,
             started_at=started_at,
             convert_mode=convert_mode,
             extraction_mode=extraction_mode,
         )
-        original_png = job_dir / "original.png"
-        if not original_png.is_file():
-            img = render_pdf_page(pdf_path, dpi=150)
-            img.save(original_png, format="PNG")
-        _update(job_dir, has_original_png=True)
 
         convert_raw = job_dir / "12_convert_result_raw.json"
         if convert_raw.is_file():
@@ -355,6 +441,7 @@ def run_job(job_id: str) -> None:
                 cheap=True,
                 mime="application/pdf",
                 mode=convert_mode,
+                on_artifact=lambda path: _sync_artifact(job_dir, path),
             )
             checkpoint_id = convert_result["checkpoint_id"]
             convert_cost = (convert_result.get("cost_breakdown") or {}).get(
@@ -378,6 +465,7 @@ def run_job(job_id: str) -> None:
                 job_dir,
                 tag="downtime",
                 extraction_mode=extraction_mode,
+                on_artifact=lambda path: _sync_artifact(job_dir, path),
             )
         _update(
             job_dir,
@@ -396,6 +484,7 @@ def run_job(job_id: str) -> None:
                 job_dir,
                 tag="rejects",
                 extraction_mode=extraction_mode,
+                on_artifact=lambda path: _sync_artifact(job_dir, path),
             )
         _update(job_dir, datalab=_datalab_refs_from_disk(job_dir))
 
@@ -463,9 +552,11 @@ def _write_merged_and_finish(
             "machine_counter": rejects.get("machine_counter"),
         }
     )
-    (job_dir / "extract_merged_clean.json").write_text(
+    merged_path = job_dir / "extract_merged_clean.json"
+    merged_path.write_text(
         json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _sync_artifact(job_dir, merged_path)
 
     dt_cost = (dt_result.get("cost_breakdown") or {}).get("final_cost_cents")
     rj_cost = (rj_result.get("cost_breakdown") or {}).get("final_cost_cents")
@@ -508,7 +599,8 @@ def _write_merged_and_finish(
         duration_seconds=duration,
         cost_cents=total_cost,
         cost_breakdown=cost_breakdown,
-        has_original_png=(new_dir / "original.png").is_file(),
+        has_pdf=True,
+        pdf_page=int(read_meta(new_dir).get('page') or 1),
         has_merged_json=(new_dir / "extract_merged_clean.json").is_file(),
     )
 
@@ -533,32 +625,46 @@ def _fail(job_dir: Path, message: str) -> None:
 
 
 def _save_convert_result_files(job_dir: Path, result: dict) -> None:
-    (job_dir / "12_convert_result_raw.json").write_text(
+    raw_path = job_dir / "12_convert_result_raw.json"
+    raw_path.write_text(
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _sync_artifact(job_dir, raw_path)
     if result.get("markdown"):
-        (job_dir / "convert_result.md").write_text(result["markdown"], encoding="utf-8")
+        markdown_path = job_dir / "convert_result.md"
+        markdown_path.write_text(result["markdown"], encoding="utf-8")
+        _sync_artifact(job_dir, markdown_path)
     if result.get("html"):
-        (job_dir / "convert_result.html").write_text(result["html"], encoding="utf-8")
+        html_path = job_dir / "convert_result.html"
+        html_path.write_text(result["html"], encoding="utf-8")
+        _sync_artifact(job_dir, html_path)
     if result.get("json") is not None:
-        (job_dir / "convert_result.json").write_text(
+        json_path = job_dir / "convert_result.json"
+        json_path.write_text(
             json.dumps(result["json"], indent=2, ensure_ascii=False), encoding="utf-8"
         )
+        _sync_artifact(job_dir, json_path)
 
 
 def _save_extract_result_files(job_dir: Path, tag: str, result: dict) -> None:
-    (job_dir / f"22_{tag}_extract_result_raw.json").write_text(
+    raw_path = job_dir / f"22_{tag}_extract_result_raw.json"
+    raw_path.write_text(
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _sync_artifact(job_dir, raw_path)
     extracted = parse_extraction(result)
     if extracted is not None:
-        (job_dir / f"extract_{tag}.json").write_text(
+        extracted_path = job_dir / f"extract_{tag}.json"
+        extracted_path.write_text(
             json.dumps(extracted, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-        (job_dir / f"extract_{tag}_clean.json").write_text(
+        _sync_artifact(job_dir, extracted_path)
+        clean_path = job_dir / f"extract_{tag}_clean.json"
+        clean_path.write_text(
             json.dumps(clean(extracted), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        _sync_artifact(job_dir, clean_path)
 
 
 def _finalize_from_merged_file(job_dir: Path) -> str:
@@ -591,7 +697,8 @@ def _finalize_from_merged_file(job_dir: Path) -> str:
         name=display,
         status="done",
         stage="done",
-        has_original_png=(new_dir / "original.png").is_file(),
+        has_pdf=True,
+        pdf_page=int(read_meta(new_dir).get('page') or 1),
         has_merged_json=True,
         finished_at=finished_at,
         duration_seconds=duration,
@@ -671,6 +778,25 @@ def _job_looks_incomplete(meta: dict, job_dir: Path) -> bool:
 
 
 def reconcile_jobs(*, fetch_datalab: bool = True, requeue: bool = True) -> dict:
+    """Run at most one reconciliation per process to avoid duplicate remote checks."""
+    if not _reconcile_lock.acquire(blocking=False):
+        return {
+            "synced": 0,
+            "healed": [],
+            "datalab": [],
+            "requeued": [],
+            "errors": [],
+            "in_progress": 0,
+            "ready": 0,
+            "skipped": True,
+        }
+    try:
+        return _reconcile_jobs(fetch_datalab=fetch_datalab, requeue=requeue)
+    finally:
+        _reconcile_lock.release()
+
+
+def _reconcile_jobs(*, fetch_datalab: bool = True, requeue: bool = True) -> dict:
     """Sync DB, heal crash leftovers, optionally re-fetch Datalab, requeue stuck jobs.
 
     Datalab keeps completed results for about one hour — after that, only local
@@ -685,9 +811,6 @@ def reconcile_jobs(*, fetch_datalab: bool = True, requeue: bool = True) -> dict:
         "in_progress": 0,
         "ready": 0,
     }
-    if not JOBS_DIR.is_dir():
-        return summary
-
     api_key: str | None = None
     if fetch_datalab:
         try:
@@ -696,19 +819,16 @@ def reconcile_jobs(*, fetch_datalab: bool = True, requeue: bool = True) -> dict:
             summary["errors"].append(f"Datalab key: {e}")
             api_key = None
 
-    for child in sorted(JOBS_DIR.iterdir(), key=lambda p: p.name):
-        if not child.is_dir() or child.name.startswith("."):
-            continue
-        if not _meta_path(child).is_file():
-            continue
+    store = get_store()
+    for stored_job_id in store.list_job_ids():
         try:
-            meta = read_meta(child)
+            job_dir = get_job_dir(stored_job_id)
+            meta = read_meta(job_dir)
         except (OSError, json.JSONDecodeError) as e:
-            summary["errors"].append(f"{child.name}: bad meta ({e})")
+            summary["errors"].append(f"{stored_job_id}: bad meta ({e})")
             continue
 
-        job_dir = child
-        job_id = child.name
+        job_id = stored_job_id
         try:
             _sync_db_record(job_dir, {**meta, "id": job_id})
             summary["synced"] += 1
@@ -718,7 +838,7 @@ def reconcile_jobs(*, fetch_datalab: bool = True, requeue: bool = True) -> dict:
                 new_id = _finalize_from_merged_file(job_dir)
                 summary["healed"].append(f"{job_id} → {new_id} (from merged JSON)")
                 job_id = new_id
-                job_dir = JOBS_DIR / new_id
+                job_dir = get_job_dir(new_id)
                 meta = read_meta(job_dir)
 
             if meta.get("status") == "done":
@@ -744,8 +864,8 @@ def reconcile_jobs(*, fetch_datalab: bool = True, requeue: bool = True) -> dict:
                 summary["ready"] += 1
                 continue
 
-            meta = read_meta(JOBS_DIR / resolve_job_id(job_id))
-            job_dir = JOBS_DIR / resolve_job_id(job_id)
+            job_dir = get_job_dir(job_id)
+            meta = read_meta(job_dir)
             job_id = job_dir.name
 
             if meta.get("status") == "done":
@@ -770,21 +890,21 @@ def reconcile_jobs(*, fetch_datalab: bool = True, requeue: bool = True) -> dict:
 
     for rec in list(OcrJobRecord.objects.all()):
         folder_name = rec.folder_name
-        folder = JOBS_DIR / folder_name
-        if folder.is_dir():
+        if store.exists(f"jobs/{folder_name}/meta.json"):
             continue
         try:
             get_job_dir(folder_name)
             continue
         except FileNotFoundError:
             pass
-        alias_target = ALIAS_DIR / folder_name
-        if alias_target.is_file():
+        alias_target = f"jobs/.aliases/{folder_name}"
+        if store.exists(alias_target):
             try:
                 target = resolve_job_id(folder_name)
-                if (JOBS_DIR / target).is_dir():
+                if store.exists(f"jobs/{target}/meta.json"):
                     rec.folder_name = target
-                    meta = read_meta(JOBS_DIR / target)
+                    target_dir = get_job_dir(target)
+                    meta = read_meta(target_dir)
                     rec.display_name = meta.get("name") or target
                     rec.ocr_status = meta.get("status") or rec.ocr_status
                     rec.ocr_stage = meta.get("stage") or ""
@@ -854,6 +974,11 @@ def _ensure_workers() -> None:
         ).start()
 
 
+def start_runtime() -> None:
+    """Start the single-process worker pool and crash recovery from WSGI startup."""
+    _ensure_workers()
+
+
 def queue_depth() -> int:
     return _job_queue.qsize()
 
@@ -862,18 +987,19 @@ def start_jobs_from_upload(
     upload_id: str,
     pages: list[int],
     *,
+    request_id: str,
     convert_mode: str = DEFAULT_CONVERT_MODE,
     extraction_mode: str = DEFAULT_EXTRACTION_MODE,
 ) -> list[dict]:
     from ocr.pipeline.uploads import (
-        extract_pdf_page,
         get_upload_dir,
         read_upload_meta,
     )
 
     meta = read_upload_meta(upload_id)
-    up_dir = get_upload_dir(upload_id)
-    src = up_dir / "source.pdf"
+    request_id = str(request_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", request_id):
+        raise ValueError("A valid OCR request ID is required")
     page_count = int(meta["page_count"])
     if not pages:
         raise ValueError("No pages selected")
@@ -882,31 +1008,70 @@ def start_jobs_from_upload(
         if p < 1 or p > page_count:
             raise ValueError(f"Page {p} out of range 1..{page_count}")
 
+    source_key = meta.get('source_key')
+    source_sha256 = meta.get('content_sha256')
+    if not source_key or not source_sha256:
+        # Promote a legacy staged upload into the content-addressed source store.
+        source_bytes = (get_upload_dir(upload_id) / 'source.pdf').read_bytes()
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        source_key = f'sources/{source_sha256}.pdf'
+        get_store().put_bytes_if_absent(
+            source_key,
+            source_bytes,
+            content_type='application/pdf',
+        )
+
     jobs: list[dict] = []
     for page in unique_pages:
-        tmp = up_dir / f"extract_p{page}.pdf"
-        extract_pdf_page(src, page, tmp)
-        pdf_bytes = tmp.read_bytes()
-        tmp.unlink(missing_ok=True)
+        job_digest = hashlib.sha256(f"{request_id}:{page}".encode("utf-8")).hexdigest()
         job = create_job(
-            pdf_bytes,
             meta["original_filename"],
+            source_key=str(source_key),
+            source_sha256=str(source_sha256),
+            source_page_count=page_count,
             convert_mode=convert_mode,
             extraction_mode=extraction_mode,
             page=page,
             upload_id=upload_id,
+            request_id=request_id,
+            job_id=f"job-{job_digest[:16]}",
         )
-        start_job_thread(job["id"])
+        if job.get("status") not in {"done", "failed"}:
+            start_job_thread(job["id"])
         jobs.append(job)
     return jobs
 
 
 def load_merged(job_id: str) -> dict:
-    job_dir = get_job_dir(job_id)
-    path = job_dir / "extract_merged_clean.json"
-    if not path.is_file():
-        raise FileNotFoundError("merged json not ready")
-    return normalize_merged(json.loads(path.read_text(encoding="utf-8")))
+    resolved = resolve_job_id(job_id)
+    try:
+        value = get_store().get_json(f"jobs/{resolved}/extract_merged_clean.json")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError("merged json not ready") from exc
+    return normalize_merged(value)
+
+
+def read_job_bytes(job_id: str, filename: str) -> bytes:
+    safe_filename = Path(filename).name
+    if safe_filename != filename:
+        raise FileNotFoundError(filename)
+    resolved = resolve_job_id(job_id)
+    try:
+        return get_store().get_bytes(f"jobs/{resolved}/{safe_filename}")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(filename) from exc
+
+
+def read_job_pdf(job_id: str) -> tuple[bytes, int]:
+    resolved = resolve_job_id(job_id)
+    meta = get_job_meta(resolved)
+    source_key = meta.get('source_key')
+    if source_key:
+        return get_store().get_bytes(str(source_key)), int(meta.get('page') or 1)
+    try:
+        return get_store().get_bytes(f"jobs/{resolved}/input.pdf"), 1
+    except FileNotFoundError as exc:
+        raise FileNotFoundError('PDF source not found') from exc
 
 
 def save_merged(job_id: str, data: dict) -> dict:
@@ -916,21 +1081,20 @@ def save_merged(job_id: str, data: dict) -> dict:
     bak = job_dir / "extract_merged_ocr.json"
     if path.is_file() and not bak.is_file():
         bak.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        _sync_artifact(job_dir, bak)
     path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding='utf-8')
+    _sync_artifact(job_dir, path)
 
     header = merged.get("header") or {}
     display = display_name_from_header(header)
     meta = read_meta(job_dir)
-    _update(
+    meta = _update(
         job_dir,
         has_merged_json=True,
         edited=True,
         header=header,
         name=display,
     )
-    if display != meta.get("name"):
-        job_dir = _rename_job_folder(job_dir, display)
-        meta = _update(job_dir, id=job_dir.name, name=display)
 
     from ocr.models import OcrJobRecord
     try:
@@ -960,24 +1124,75 @@ def revert_merged(job_id: str) -> dict:
         rec.mark_stale_if_imported()
     except OcrJobRecord.DoesNotExist:
         pass
+    _sync_artifact(job_dir, path)
     return merged
 
 
 def delete_job(job_id: str) -> None:
-    job_dir = get_job_dir(job_id)
-    real_id = job_dir.name
+    real_id = resolve_job_id(job_id)
+    job_dir = JOBS_DIR / real_id
     with _lock:
-        shutil.rmtree(job_dir)
+        store = get_store()
+        try:
+            meta = get_job_meta(real_id)
+        except (FileNotFoundError, ValueError, json.JSONDecodeError):
+            meta = {}
+        source_key = str(meta.get('source_key') or '')
+        upload_id = str(meta.get('upload_id') or '')
+
+        store.delete_prefix(_job_prefix(real_id))
+        shutil.rmtree(job_dir, ignore_errors=True)
         _delete_db_record(real_id)
+        if upload_id:
+            from ocr.models import OcrJobRecord
+
+            upload_still_used = any(
+                isinstance(metadata, dict) and metadata.get('upload_id') == upload_id
+                for metadata in OcrJobRecord.objects.values_list('metadata', flat=True)
+            )
+            if not upload_still_used:
+                store.delete_prefix(f"uploads/{Path(upload_id).name}")
+                shutil.rmtree(UPLOADS_DIR / Path(upload_id).name, ignore_errors=True)
         # Drop aliases that pointed at this folder
-        if ALIAS_DIR.is_dir():
-            for alias in ALIAS_DIR.iterdir():
-                if not alias.is_file():
-                    continue
-                try:
-                    if alias.read_text(encoding="utf-8").strip() == real_id:
-                        alias.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        for alias in store.list_alias_ids():
+            try:
+                if store.get_text(f"jobs/.aliases/{alias}").strip() == real_id:
+                    store.delete_object(f"jobs/.aliases/{alias}")
+                    (ALIAS_DIR / alias).unlink(missing_ok=True)
+            except OSError:
+                pass
             # Also remove alias named after the request id
-            (ALIAS_DIR / Path(job_id).name).unlink(missing_ok=True)
+        request_alias = Path(job_id).name
+        store.delete_object(f"jobs/.aliases/{request_alias}")
+        (ALIAS_DIR / request_alias).unlink(missing_ok=True)
+
+        if source_key.startswith('sources/') and not _source_is_referenced(source_key, store):
+            store.delete_object(source_key)
+
+
+def _source_is_referenced(source_key: str, store) -> bool:
+    """Keep a content-addressed PDF while another job or staged upload uses it."""
+    from ocr.models import OcrJobRecord
+
+    for metadata in OcrJobRecord.objects.values_list('metadata', flat=True):
+        if isinstance(metadata, dict) and metadata.get('source_key') == source_key:
+            return True
+
+    try:
+        upload_meta_keys = [
+            key
+            for key in store.list_keys('uploads')
+            if key.startswith('uploads/') and key.endswith('/meta.json')
+        ]
+    except Exception:
+        # Retaining an unverified shared source is safer than breaking another upload.
+        return True
+
+    for key in upload_meta_keys:
+        try:
+            upload_meta = store.get_json(key)
+        except (FileNotFoundError, ValueError, json.JSONDecodeError):
+            return True
+        if upload_meta.get('source_key') == source_key:
+            return True
+    return False

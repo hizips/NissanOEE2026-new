@@ -1,0 +1,19 @@
+.DS_Store
+.aws-build/
+.local-backups/
+oee-data.json
+
+# Local Python/runtime artifacts
+__pycache__/
+*.py[cod]
+.venv/
+backend/staticfiles/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+!frontend/.env.aws.example
+
+# Frontend build output
+frontend/dist/

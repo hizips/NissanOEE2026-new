@@ -11,7 +11,7 @@ import type {
   DowntimeEventHistory
 } from '@/types';
 import { matchesShiftRecord } from '@/utils/ocrRecordUtils';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Dashboard } from '@/components/Dashboard';
 import { DataEntry } from '@/components/DataEntry';
@@ -29,8 +29,8 @@ import { ScheduledDowntimeManagement } from '@/components/ScheduledDowntimeManag
 import { Toaster } from '@/components/ui/sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Factory, Clock, Calendar, LogOut, User } from 'lucide-react';
-import { format } from 'date-fns';
+import { Factory, Clock, Calendar, LogOut, User, Loader2, RefreshCw } from 'lucide-react';
+import { format, subDays } from 'date-fns';
 import { toast } from 'sonner';
 import {
   operatorApi, partApi, machineApi, defectReasonApi,
@@ -39,6 +39,55 @@ import {
   addDieToPart, removeDieFromPart
 } from '@/services/api';
 import { cancelReauth } from '@/services/authSession';
+
+const OCR_ENABLED = import.meta.env.VITE_ENABLE_OCR !== 'false';
+
+interface OperationalDateRange {
+  start: string;
+  end: string;
+}
+
+interface OperationalDateBounds {
+  min: string;
+  max: string;
+}
+
+const defaultOperationalDateRange = (): OperationalDateRange => ({
+  start: format(subDays(new Date(), 6), 'yyyy-MM-dd'),
+  end: format(new Date(), 'yyyy-MM-dd'),
+});
+
+const rangeQuery = (range: OperationalDateRange) => ({
+  start_date: range.start,
+  end_date: range.end,
+});
+
+function normalizeOperationalDateRange(start: string, end: string): OperationalDateRange | null {
+  if (!start || !end) return null;
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
+function mergeOperationalRanges(ranges: OperationalDateRange[]) {
+  return [...ranges]
+    .sort((left, right) => left.start.localeCompare(right.start))
+    .reduce<OperationalDateRange[]>((merged, range) => {
+      const previous = merged[merged.length - 1];
+      if (!previous || range.start > previous.end) {
+        merged.push({ ...range });
+      } else if (range.end > previous.end) {
+        previous.end = range.end;
+      }
+      return merged;
+    }, []);
+}
+
+function mergeDatedRows<T extends { id: string; date: string }>(current: T[], incoming: T[]) {
+  const byId = new Map(current.map(row => [row.id, row]));
+  incoming.forEach(row => byId.set(row.id, row));
+  return [...byId.values()].sort((left, right) => (
+    right.date.localeCompare(left.date) || Number(right.id) - Number(left.id)
+  ));
+}
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
@@ -61,6 +110,9 @@ export default function App() {
   const [productionRecords, setProductionRecords] = useState<ProductionRecord[]>([]);
   const [partProductionHistory, setPartProductionHistory] = useState<PartProductionHistory[]>([]);
   const [downtimeEventHistory, setDowntimeEventHistory] = useState<DowntimeEventHistory[]>([]);
+  const [operationalDateBounds, setOperationalDateBounds] = useState<OperationalDateBounds>({ min: '', max: '' });
+  const loadedOperationalRanges = useRef<OperationalDateRange[]>([]);
+  const [isDataLoading, setIsDataLoading] = useState(isAuthenticated);
 
   const [operatorSetup, setOperatorSetup] = useState<OperatorSetupData | null>(null);
   const [showOperatorSetup, setShowOperatorSetup] = useState(false);
@@ -70,22 +122,34 @@ export default function App() {
   );
 
   const loadData = useCallback(async () => {
+    const rangesToLoad = loadedOperationalRanges.current.length > 0
+      ? loadedOperationalRanges.current
+      : [defaultOperationalDateRange()];
+    setIsDataLoading(true);
+
     try {
-      const [
-        ops, pts, mchs,
-        defects, downtimes, processes, schedules,
-        records, partHist, dtHist
-      ] = await Promise.all([
-        operatorApi.getAll(),
-        partApi.getAll(),
-        machineApi.getAll(),
-        defectReasonApi.getAll(),
-        downtimeReasonApi.getAll(),
-        processReasonApi.getAll(),
-        scheduledDowntimeApi.getAll(),
-        productionRecordApi.getAll(),
-        partProductionHistoryApi.getAll(),
-        downtimeEventHistoryApi.getAll(),
+      const [[
+        ops, pts, mchs, defects, downtimes, processes, schedules, bounds,
+      ], operationalBatches] = await Promise.all([
+        Promise.all([
+          operatorApi.getAll(),
+          partApi.getAll(),
+          machineApi.getAll(),
+          defectReasonApi.getAll(),
+          downtimeReasonApi.getAll(),
+          processReasonApi.getAll(),
+          scheduledDowntimeApi.getAll(),
+          productionRecordApi.getDateBounds(),
+        ]),
+        Promise.all(rangesToLoad.map(async range => {
+          const query = rangeQuery(range);
+          const [records, partHist, dtHist] = await Promise.all([
+            productionRecordApi.getAll(query),
+            partProductionHistoryApi.getAll(query),
+            downtimeEventHistoryApi.getAll(query),
+          ]);
+          return { records, partHist, dtHist };
+        })),
       ]);
 
       setOperators(ops);
@@ -95,19 +159,55 @@ export default function App() {
       setDowntimeReasons(downtimes);
       setProcessReasons(processes);
       setScheduledDowntimes(schedules);
-      setProductionRecords(records);
-      setPartProductionHistory(partHist);
-      setDowntimeEventHistory(dtHist);
+      setOperationalDateBounds({ min: bounds.min || '', max: bounds.max || '' });
+      setProductionRecords(mergeDatedRows([], operationalBatches.flatMap(batch => batch.records)));
+      setPartProductionHistory(mergeDatedRows([], operationalBatches.flatMap(batch => batch.partHist)));
+      setDowntimeEventHistory(mergeDatedRows([], operationalBatches.flatMap(batch => batch.dtHist)));
+      loadedOperationalRanges.current = mergeOperationalRanges(rangesToLoad);
     } catch (err) {
       console.error("Failed to load data from API", err);
       toast.error("Failed to load data from server. Please check your connection.");
+    } finally {
+      setIsDataLoading(false);
+    }
+  }, []);
+
+  const loadOperationalDateRange = useCallback(async (start: string, end: string) => {
+    const range = normalizeOperationalDateRange(start, end);
+    if (!range) return;
+    const alreadyLoaded = loadedOperationalRanges.current.some(loaded => (
+      loaded.start <= range.start && loaded.end >= range.end
+    ));
+    if (alreadyLoaded) return;
+
+    setIsDataLoading(true);
+
+    try {
+      const query = rangeQuery(range);
+      const [records, partHist, dtHist] = await Promise.all([
+        productionRecordApi.getAll(query),
+        partProductionHistoryApi.getAll(query),
+        downtimeEventHistoryApi.getAll(query),
+      ]);
+      setProductionRecords(current => mergeDatedRows(current, records));
+      setPartProductionHistory(current => mergeDatedRows(current, partHist));
+      setDowntimeEventHistory(current => mergeDatedRows(current, dtHist));
+      loadedOperationalRanges.current = mergeOperationalRanges([
+        ...loadedOperationalRanges.current,
+        range,
+      ]);
+    } catch (err) {
+      console.error('Failed to load the selected date range', err);
+      toast.error('Failed to load the selected date range.');
+    } finally {
+      setIsDataLoading(false);
     }
   }, []);
 
   useEffect(() => {
     if (!isAuthenticated) return;
     loadData();
-  }, [isAuthenticated, activeTab, loadData]);
+  }, [isAuthenticated, loadData]);
 
   const addProductionRecord = async (record: Omit<ProductionRecord, 'id' | 'timestamp'>) => {
     try {
@@ -403,6 +503,7 @@ export default function App() {
 
   const handleLogin = (employeeId: string, role: 'operator' | 'manager') => {
     const user = { employeeId, role };
+    setIsDataLoading(true);
     setCurrentUser(user);
     setIsAuthenticated(true);
     sessionStorage.setItem('oee-authenticated', 'true');
@@ -410,12 +511,16 @@ export default function App() {
 
     // For operators, show the setup screen after login
     if (role === 'operator') {
+      setActiveTab('entry');
       setShowOperatorSetup(true);
+    } else {
+      setActiveTab('dashboard');
     }
   };
 
   const handleStartWork = (setupData: OperatorSetupData) => {
     setOperatorSetup(setupData);
+    setActiveTab('entry');
     setShowOperatorSetup(false);
     setSetupMode('new');
   };
@@ -441,6 +546,9 @@ export default function App() {
     setCurrentUser(null);
     setOperatorSetup(null);
     setShowOperatorSetup(false);
+    setIsDataLoading(false);
+    loadedOperationalRanges.current = [];
+    setOperationalDateBounds({ min: '', max: '' });
     sessionStorage.removeItem('oee-authenticated');
     sessionStorage.removeItem('oee-current-user');
     sessionStorage.removeItem('oee-auth-token');
@@ -488,6 +596,7 @@ export default function App() {
           existingSetup={setupMode !== 'new' ? operatorSetup || undefined : undefined}
           mode={setupMode}
         />
+        <ReauthDialog onLogout={handleLogout} />
         <Toaster />
       </>
     );
@@ -535,6 +644,19 @@ export default function App() {
                 </div>
               </div>
               <div className="flex items-center gap-6">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={loadData}
+                  disabled={isDataLoading}
+                  className="gap-2 border-slate-600 bg-slate-800 text-white hover:bg-slate-700 hover:text-white disabled:opacity-70"
+                >
+                  {isDataLoading
+                    ? <Loader2 className="h-4 w-4 animate-spin" />
+                    : <RefreshCw className="h-4 w-4" />}
+                  <span>{isDataLoading ? 'Loading Data' : 'Refresh Data'}</span>
+                </Button>
                 <div className="flex items-center gap-2 text-sm">
                   <Calendar className="h-4 w-4 text-slate-400" />
                   <span className="font-semibold">{format(currentTime, 'MMM dd, yyyy')}</span>
@@ -585,7 +707,10 @@ export default function App() {
             className="space-y-6"
           >
             {currentUser?.role === 'manager' ? (
-              <TabsList className="grid w-full grid-cols-9 h-14 p-1.5 gap-1">
+              <TabsList className={OCR_ENABLED
+                ? "grid w-full grid-cols-9 h-14 p-1.5 gap-1"
+                : "grid w-full grid-cols-8 h-14 p-1.5 gap-1"}
+              >
                 <TabsTrigger value="dashboard" className="text-base h-full">Dashboard</TabsTrigger>
                 <TabsTrigger value="records" className="text-base h-full">Shift Records</TabsTrigger>
                 <TabsTrigger value="history" className="text-base h-full">History</TabsTrigger>
@@ -594,7 +719,9 @@ export default function App() {
                 <TabsTrigger value="parts" className="text-base h-full">Parts</TabsTrigger>
                 <TabsTrigger value="reasons" className="text-base h-full">Reasons</TabsTrigger>
                 <TabsTrigger value="downtime" className="text-base h-full">Scheduled Downtime</TabsTrigger>
-                <TabsTrigger value="ocr" className="text-base h-full">OCR Import</TabsTrigger>
+                {OCR_ENABLED && (
+                  <TabsTrigger value="ocr" className="text-base h-full">OCR Import</TabsTrigger>
+                )}
               </TabsList>
             ) : (
               <div className="max-w-2xl">
@@ -613,6 +740,9 @@ export default function App() {
                     productionRecords={productionRecords}
                     parts={parts}
                     partProductionHistory={partProductionHistory}
+                    downtimeEventHistory={downtimeEventHistory}
+                    availableDateRange={operationalDateBounds}
+                    onRequestDateRange={loadOperationalDateRange}
                   />
                 </TabsContent>
 
@@ -632,6 +762,8 @@ export default function App() {
                     onAddDowntimeEvent={addDowntimeEventHistory}
                     onUpdateDowntimeEvent={updateDowntimeEventHistory}
                     onDeleteDowntimeEvent={deleteDowntimeEventHistory}
+                    availableDateRange={operationalDateBounds}
+                    onRequestDateRange={loadOperationalDateRange}
                   />
                 </TabsContent>
 
@@ -650,6 +782,8 @@ export default function App() {
                     onUpdatePartHistory={updatePartProductionHistory}
                     onUpdateDowntimeEvent={updateDowntimeEventHistory}
                     userRole={currentUser?.role || 'operator'}
+                    availableDateRange={operationalDateBounds}
+                    onRequestDateRange={loadOperationalDateRange}
                   />
                 </TabsContent>
 
@@ -715,9 +849,11 @@ export default function App() {
                   />
                 </TabsContent>
 
-                <TabsContent value="ocr" className="mt-0">
-                  <OcrImport active={activeTab === 'ocr'} />
-                </TabsContent>
+                {OCR_ENABLED && (
+                  <TabsContent value="ocr" className="mt-0">
+                    <OcrImport active={activeTab === 'ocr'} />
+                  </TabsContent>
+                )}
               </>
             )}
 

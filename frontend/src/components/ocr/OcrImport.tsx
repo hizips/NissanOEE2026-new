@@ -23,6 +23,16 @@ import { Label } from '@/components/ui/label';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
@@ -45,10 +55,10 @@ import {
 } from '@/services/ocrApi';
 
 import { OcrSheetEditor, type OcrSheetEditorHandle } from './OcrSheetEditor';
+import { PdfDocumentViewer } from './PdfDocumentViewer';
 
 const STAGE_LABELS: Record<string, string> = {
   queued: 'Queued',
-  rendering_original: 'Rendering scan',
   converting: 'OCR convert',
   extracting_downtime: 'Extract downtime',
   extracting_rejects: 'Extract rejects',
@@ -76,8 +86,8 @@ function formatCents(cents?: number | null): string {
   return n >= 100 ? `$${(n / 100).toFixed(2)}` : `${n}¢`;
 }
 
-function jobStatusBadge(status: string, stage: string): { className: string; label: string } {
-  if (status === 'done') return { className: 'bg-green-600 text-white', label: 'Done' };
+function jobStatusBadge(status: string, stage: string): { className: string; label: string } | null {
+  if (status === 'done') return null;
   if (status === 'failed') return { className: 'bg-red-600 text-white', label: 'Failed' };
   if (status === 'queued') return { className: 'bg-slate-500 text-white', label: 'Queued' };
   return { className: 'bg-amber-500 text-white', label: STAGE_LABELS[stage] || stage || 'Running' };
@@ -106,6 +116,7 @@ function parseError(err: unknown): string {
 
 interface StagedUpload {
   id: string;
+  requestId: string;
   pageCount: number;
   originalFilename: string;
   selected: Set<number>;
@@ -125,9 +136,12 @@ export function OcrImport({ active = true }: { active?: boolean }) {
   const [importRejects, setImportRejects] = useState(true);
   const [importDowntime, setImportDowntime] = useState(true);
   const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set());
-  const [originalImg, setOriginalImg] = useState<string | null>(null);
-  const [pageThumbs, setPageThumbs] = useState<Record<number, string>>({});
+  const [originalPdf, setOriginalPdf] = useState<string | null>(null);
+  const [stagedPdf, setStagedPdf] = useState<string | null>(null);
   const [loadingJob, setLoadingJob] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deletingJob, setDeletingJob] = useState(false);
+  const [startingJobs, setStartingJobs] = useState(false);
 
   const [reconciling, setReconciling] = useState(false);
 
@@ -135,6 +149,7 @@ export function OcrImport({ active = true }: { active?: boolean }) {
   const editorRef = useRef<OcrSheetEditorHandle>(null);
   const selectedIdRef = useRef<string | null>(null);
   const selectedJobRef = useRef<OcrJob | null>(null);
+  const originalPdfJobRef = useRef<string | null>(null);
 
   selectedIdRef.current = selectedId;
   selectedJobRef.current = selectedJob;
@@ -191,39 +206,54 @@ export function OcrImport({ active = true }: { active?: boolean }) {
   useEffect(() => {
     if (!active) return;
     loadOptions().catch((e) => toast.error(parseError(e)));
-    reconcileAndRefresh({ quiet: true }).catch(() => {});
-  }, [active, loadOptions, reconcileAndRefresh]);
+    refreshHistory().catch((e) => toast.error(parseError(e)));
+  }, [active, loadOptions, refreshHistory]);
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      refreshHistory().catch(() => {});
+    if (!active) return;
+    let polling = false;
+    const timer = setInterval(async () => {
+      if (polling) return;
+      polling = true;
       const id = selectedIdRef.current;
       const job = selectedJobRef.current;
-      if (id && job && job.status !== 'done' && job.status !== 'failed') {
-        refreshJob(id, false).catch(() => {});
+      try {
+        if (id && job && job.status !== 'done' && job.status !== 'failed') {
+          await refreshJob(id, false, false);
+        } else {
+          await refreshHistory();
+        }
+      } catch {
+        // A later poll or manual refresh can recover transient failures.
+      } finally {
+        polling = false;
       }
     }, 3000);
     return () => clearInterval(timer);
-  }, [refreshHistory]);
+  }, [active, refreshHistory]);
 
   useEffect(() => {
     return () => {
-      if (originalImg?.startsWith('blob:')) URL.revokeObjectURL(originalImg);
-      Object.values(pageThumbs).forEach((u) => {
-        if (u.startsWith('blob:')) URL.revokeObjectURL(u);
-      });
+      if (originalPdf?.startsWith('blob:')) URL.revokeObjectURL(originalPdf);
     };
-  }, [originalImg, pageThumbs]);
+  }, [originalPdf]);
 
-  async function loadOriginalImage(job: OcrJob) {
-    if (originalImg?.startsWith('blob:')) URL.revokeObjectURL(originalImg);
-    setOriginalImg(null);
-    if (!job.hasOriginalPng) return;
+  useEffect(() => {
+    return () => {
+      if (stagedPdf?.startsWith('blob:')) URL.revokeObjectURL(stagedPdf);
+    };
+  }, [stagedPdf]);
+
+  async function loadOriginalPdf(job: OcrJob) {
+    originalPdfJobRef.current = null;
+    setOriginalPdf(null);
+    if (!job.hasPdf) return;
     const bust = job.updatedAt || Date.now();
     const url = await fetchOcrBlobUrl(
-      `/jobs/${encodeURIComponent(job.id)}/original.png?t=${encodeURIComponent(String(bust))}`,
+      `/jobs/${encodeURIComponent(job.id)}/source.pdf?t=${encodeURIComponent(String(bust))}`,
     );
-    setOriginalImg(url);
+    originalPdfJobRef.current = job.id;
+    setOriginalPdf(url);
   }
 
   async function loadMergedForJob(job: OcrJob) {
@@ -235,20 +265,26 @@ export function OcrImport({ active = true }: { active?: boolean }) {
     setMerged(data.merged);
   }
 
-  async function refreshJob(id: string, resetImage: boolean) {
+  async function refreshJob(id: string, resetImage: boolean, refreshList = true) {
     setLoadingJob(true);
     try {
       const job = await ocrApi.getJob(id);
       setSelectedId(job.id);
       setSelectedJob(job);
+      setJobs((current) => {
+        const found = current.some((item) => item.id === job.id);
+        return found
+          ? current.map((item) => (item.id === job.id ? { ...item, ...job } : item))
+          : [job, ...current];
+      });
       setView('job');
 
-      if (resetImage || job.hasOriginalPng) {
-        await loadOriginalImage(job).catch(() => {});
+      if (resetImage || (job.hasPdf && originalPdfJobRef.current !== job.id)) {
+        await loadOriginalPdf(job).catch(() => {});
       }
 
       await loadMergedForJob(job);
-      await refreshHistory();
+      if (refreshList) await refreshHistory();
     } catch (e) {
       toast.error(parseError(e) || 'Could not load job');
     } finally {
@@ -265,58 +301,58 @@ export function OcrImport({ active = true }: { active?: boolean }) {
       toast.error('Upload a PDF scan');
       return;
     }
+    if (stagedUpload) {
+      await ocrApi.deleteUpload(stagedUpload.id).catch(() => {});
+    }
     toast.message(`Uploading ${file.name}…`);
     const meta = await ocrApi.uploadPdf(file);
+    setStagedPdf(URL.createObjectURL(file));
     setStagedUpload({
       id: meta.id,
+      requestId: crypto.randomUUID(),
       pageCount: meta.pageCount,
       originalFilename: meta.originalFilename,
       selected: new Set(Array.from({ length: meta.pageCount }, (_, i) => i + 1)),
     });
     setView('staging');
-
-    const thumbs: Record<number, string> = {};
-    for (let p = 1; p <= meta.pageCount; p++) {
-      thumbs[p] = await fetchOcrBlobUrl(
-        `/uploads/${encodeURIComponent(meta.id)}/pages/${p}.png`,
-      );
-    }
-    setPageThumbs(thumbs);
   }
 
   async function cancelStaging(deleteRemote: boolean) {
     if (deleteRemote && stagedUpload) {
       await ocrApi.deleteUpload(stagedUpload.id).catch(() => {});
     }
-    Object.values(pageThumbs).forEach((u) => {
-      if (u.startsWith('blob:')) URL.revokeObjectURL(u);
-    });
-    setPageThumbs({});
+    setStagedPdf(null);
     setStagedUpload(null);
     setView('empty');
   }
 
   async function startStagedJobs() {
-    if (!stagedUpload) return;
+    if (!stagedUpload || startingJobs) return;
     const pages = [...stagedUpload.selected].sort((a, b) => a - b);
     if (!pages.length) {
       toast.error('Select at least one page');
       return;
     }
-    const result = await ocrApi.startJobs({
-      uploadId: stagedUpload.id,
-      pages,
-      convertMode,
-      extractionMode,
-    });
-    setStagedUpload(null);
-    setPageThumbs({});
-    await refreshHistory();
-    if (result.jobs.length) {
-      await selectJob(result.jobs[0].id);
-      toast.success(result.jobs.length === 1 ? 'OCR job started' : `${result.jobs.length} OCR jobs started`);
-    } else {
-      setView('empty');
+    setStartingJobs(true);
+    try {
+      const result = await ocrApi.startJobs({
+        uploadId: stagedUpload.id,
+        requestId: stagedUpload.requestId,
+        pages,
+        convertMode,
+        extractionMode,
+      });
+      setStagedUpload(null);
+      setStagedPdf(null);
+      await refreshHistory();
+      if (result.jobs.length) {
+        await selectJob(result.jobs[0].id);
+        toast.success(result.jobs.length === 1 ? 'OCR job started' : `${result.jobs.length} OCR jobs started`);
+      } else {
+        setView('empty');
+      }
+    } finally {
+      setStartingJobs(false);
     }
   }
 
@@ -375,15 +411,27 @@ export function OcrImport({ active = true }: { active?: boolean }) {
 
   async function deleteJob() {
     if (!selectedId) return;
-    if (!confirm('Delete this job and its saved files?')) return;
-    await ocrApi.deleteJob(selectedId);
-    setSelectedId(null);
-    setSelectedJob(null);
-    setMerged(null);
-    setOriginalImg(null);
-    setView('empty');
-    await refreshHistory();
-    toast.success('Deleted');
+    const deletedId = selectedId;
+    setDeletingJob(true);
+    try {
+      await ocrApi.deleteJob(deletedId);
+      originalPdfJobRef.current = null;
+      setSelectedId(null);
+      setSelectedJob(null);
+      setMerged(null);
+      setOriginalPdf(null);
+      setBatchSelected((current) => {
+        const next = new Set(current);
+        next.delete(deletedId);
+        return next;
+      });
+      setView('empty');
+      setDeleteConfirmOpen(false);
+      await refreshHistory();
+      toast.success('OCR scan job deleted');
+    } finally {
+      setDeletingJob(false);
+    }
   }
 
   function toggleBatchJob(id: string) {
@@ -535,9 +583,11 @@ export function OcrImport({ active = true }: { active?: boolean }) {
                             <div className="font-medium text-sm leading-snug text-slate-900">{job.name || job.id}</div>
                           </button>
                           <div className="mt-2 flex flex-wrap gap-1.5">
-                            <Badge className={`${status.className} text-xs px-2 py-0.5`}>
-                              {status.label}
-                            </Badge>
+                            {status && (
+                              <Badge className={`${status.className} text-xs px-2 py-0.5`}>
+                                {status.label}
+                              </Badge>
+                            )}
                             {importBadge && (
                               <button
                                 type="button"
@@ -651,44 +701,76 @@ export function OcrImport({ active = true }: { active?: boolean }) {
                     <Button variant="outline" size="sm" className="border-slate-300" onClick={() => cancelStaging(true).catch(() => {})}>
                       Cancel
                     </Button>
-                    <Button size="sm" className="bg-slate-950 text-white hover:bg-slate-800" onClick={() => startStagedJobs().catch((e) => toast.error(parseError(e)))}>
-                      Start OCR
+                    <Button
+                      size="sm"
+                      className="bg-slate-950 text-white hover:bg-slate-800"
+                      disabled={startingJobs}
+                      onClick={() => startStagedJobs().catch((e) => toast.error(parseError(e)))}
+                    >
+                      {startingJobs && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+                      {startingJobs ? 'Starting…' : 'Start OCR'}
                     </Button>
                   </div>
                 </div>
               </CardHeader>
               <CardContent>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-                  {Array.from({ length: stagedUpload.pageCount }, (_, i) => i + 1).map((p) => {
-                    const selected = stagedUpload.selected.has(p);
-                    return (
-                      <button
-                        key={p}
-                        type="button"
-                        onClick={() => {
-                          setStagedUpload((u) => {
-                            if (!u) return u;
-                            const next = new Set(u.selected);
-                            if (next.has(p)) next.delete(p);
-                            else next.add(p);
-                            return { ...u, selected: next };
-                          });
-                        }}
-                        className={`rounded-lg border-2 p-2 text-left transition-colors bg-white ${
-                          selected
-                            ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-200'
-                            : 'border-slate-200 hover:border-slate-400 hover:bg-slate-50'
-                        }`}
-                      >
-                        {pageThumbs[p] ? (
-                          <img src={pageThumbs[p]} alt={`Page ${p}`} className="w-full rounded object-contain aspect-[3/4] bg-slate-100 border border-slate-200" />
-                        ) : (
-                          <div className="aspect-[3/4] bg-slate-100 rounded border border-slate-200" />
-                        )}
-                        <div className="mt-2 text-sm font-medium text-slate-800">Page {p}</div>
-                      </button>
-                    );
-                  })}
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_220px]">
+                  {stagedPdf ? (
+                    <PdfDocumentViewer
+                      src={stagedPdf}
+                      page={1}
+                      title={`Preview of ${stagedUpload.originalFilename}`}
+                      className="h-[min(72vh,920px)] min-h-[540px] rounded border border-slate-200"
+                    />
+                  ) : (
+                    <div className="flex min-h-[540px] items-center justify-center rounded border border-slate-200 bg-slate-100 text-sm text-slate-500">
+                      Loading PDF preview…
+                    </div>
+                  )}
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 xl:max-h-[min(72vh,920px)] xl:overflow-y-auto">
+                    <h3 className="text-sm font-semibold text-slate-900">Pages to process</h3>
+                    <p className="mt-1 text-xs text-slate-600">
+                      The preview shows the original PDF. Select the pages to send to OCR.
+                    </p>
+                    <div className="mt-3 grid grid-cols-2 gap-2 xl:grid-cols-1">
+                      {Array.from({ length: stagedUpload.pageCount }, (_, i) => i + 1).map((p) => {
+                        const selected = stagedUpload.selected.has(p);
+                        return (
+                          <button
+                            key={p}
+                            type="button"
+                            aria-pressed={selected}
+                            onClick={() => {
+                              setStagedUpload((u) => {
+                                if (!u) return u;
+                                const next = new Set(u.selected);
+                                if (next.has(p)) next.delete(p);
+                                else next.add(p);
+                                return { ...u, selected: next };
+                              });
+                            }}
+                            className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-sm font-medium transition-colors ${
+                              selected
+                                ? 'border-blue-500 bg-blue-50 text-blue-900 ring-1 ring-blue-200'
+                                : 'border-slate-300 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50'
+                            }`}
+                          >
+                            <span
+                              aria-hidden="true"
+                              className={`flex h-4 w-4 items-center justify-center rounded border text-[10px] ${
+                                selected
+                                  ? 'border-blue-600 bg-blue-600 text-white'
+                                  : 'border-slate-400 bg-white text-transparent'
+                              }`}
+                            >
+                              ✓
+                            </span>
+                            Page {p}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -739,8 +821,9 @@ export function OcrImport({ active = true }: { active?: boolean }) {
                           </span>
                         </div>
                       )}
-                      {(() => {
+                      {selectedJob.status !== 'done' && (() => {
                         const sb = jobStatusBadge(selectedJob.status, selectedJob.stage);
+                        if (!sb) return null;
                         return (
                           <Badge className={`${sb.className} px-3 py-1`}>
                             {loadingJob && <Loader2 className="h-3 w-3 animate-spin mr-1 inline" />}
@@ -785,9 +868,13 @@ export function OcrImport({ active = true }: { active?: boolean }) {
                           )}
                         </>
                       )}
-                      <Button variant="destructive" size="sm" className="gap-1" onClick={() => deleteJob().catch((e) => toast.error(parseError(e)))}>
+                      <Button
+                        size="sm"
+                        className="gap-1 bg-red-600 text-white hover:bg-red-700 hover:text-white"
+                        onClick={() => setDeleteConfirmOpen(true)}
+                      >
                         <Trash2 className="h-3.5 w-3.5" />
-                        Delete
+                        Delete scan job
                       </Button>
                     </div>
                   </div>
@@ -798,22 +885,23 @@ export function OcrImport({ active = true }: { active?: boolean }) {
                 direction="horizontal"
                 className="flex-1 min-h-0 w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
               >
-                <ResizablePanel defaultSize={35} minSize={18} maxSize={60} className="min-w-0 min-h-0 overflow-hidden">
+                <ResizablePanel defaultSize={42} minSize={24} maxSize={65} className="min-w-0 min-h-0 overflow-hidden">
                   <div className="flex h-full min-h-0 flex-col overflow-hidden bg-white">
                     <div className="shrink-0 border-b border-slate-200/80 px-4 py-3">
                       <h3 className="text-base font-semibold text-slate-900">Original scan</h3>
                     </div>
-                    <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4">
+                    <div className="flex-1 min-h-0 overflow-hidden p-4">
                       {selectedJob.status === 'failed' ? (
                         <div className="flex items-center gap-2 text-red-600 text-sm py-8 justify-center">
                           <AlertCircle className="h-4 w-4" />
                           {selectedJob.error || 'Extraction failed'}
                         </div>
-                      ) : originalImg ? (
-                        <img
-                          src={originalImg}
-                          alt="Original scan"
-                          className="w-full rounded border border-slate-200 bg-white"
+                      ) : originalPdf ? (
+                        <PdfDocumentViewer
+                          src={originalPdf}
+                          page={selectedJob.pdfPage || 1}
+                          title={`Original scan for ${selectedJob.name || selectedJob.id}`}
+                          className="h-full min-h-[480px] w-full rounded border border-slate-200 bg-white"
                         />
                       ) : (
                         <div className="flex items-center justify-center gap-2 text-slate-500 py-12">
@@ -830,7 +918,7 @@ export function OcrImport({ active = true }: { active?: boolean }) {
                   className="w-2 bg-slate-200 hover:bg-blue-100 transition-colors data-[panel-group-direction=horizontal]:w-2"
                 />
 
-                <ResizablePanel defaultSize={65} minSize={35} className="min-w-0 min-h-0 overflow-hidden">
+                <ResizablePanel defaultSize={58} minSize={35} className="min-w-0 min-h-0 overflow-hidden">
                   <div className="flex h-full min-h-0 flex-col overflow-hidden bg-white">
                     <div className="shrink-0 border-b border-slate-200/80 px-4 py-3">
                       <h3 className="text-base font-semibold text-slate-900">Extracted data</h3>
@@ -864,6 +952,41 @@ export function OcrImport({ active = true }: { active?: boolean }) {
           )}
         </div>
       </div>
+
+      <AlertDialog open={deleteConfirmOpen} onOpenChange={(open) => !deletingJob && setDeleteConfirmOpen(open)}>
+        <AlertDialogContent className="bg-white text-slate-900">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this OCR scan job?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes the scan job, its uploaded source when it is not shared,
+              extracted data, and all saved OCR files. Production information that was already
+              imported will not be removed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingJob}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deletingJob}
+              className="bg-red-600 text-white hover:bg-red-700"
+              onClick={(event) => {
+                event.preventDefault();
+                deleteJob().catch((error) => {
+                  toast.error(parseError(error) || 'Could not delete OCR scan job');
+                });
+              }}
+            >
+              {deletingJob ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting…
+                </>
+              ) : (
+                'Delete scan job'
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

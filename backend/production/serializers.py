@@ -8,7 +8,7 @@ from .models import (
 class OperatorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Operator
-        fields = '__all__'
+        exclude = ('is_mock',)
 
 class DieSerializer(serializers.ModelSerializer):
     class Meta:
@@ -29,7 +29,7 @@ class PartSerializer(serializers.ModelSerializer):
 class MachineSerializer(serializers.ModelSerializer):
     class Meta:
         model = Machine
-        fields = '__all__'
+        exclude = ('is_mock',)
 
 class DefectReasonSerializer(serializers.ModelSerializer):
     specific_reason = serializers.CharField(required=False, allow_blank=True, default='')
@@ -61,18 +61,18 @@ class PartProductionHistorySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PartProductionHistory
-        fields = '__all__'
+        exclude = ('is_mock',)
 
 class DowntimeEventHistorySerializer(serializers.ModelSerializer):
     machine_name = serializers.ReadOnlyField(source='machine.name')
 
     class Meta:
         model = DowntimeEventHistory
-        fields = '__all__'
+        exclude = ('is_mock',)
 
 class ProductionRecordSerializer(serializers.ModelSerializer):
     machine_name = serializers.ReadOnlyField(source='machine.name') 
 
     class Meta:
         model = ProductionRecord
-        fields = '__all__'
+        exclude = ('is_mock',)

@@ -64,7 +64,7 @@ export async function fetchOcrBlobUrl(endpoint: string, retried = false): Promis
       await waitForReauth();
       return fetchOcrBlobUrl(endpoint, true);
     }
-    throw new Error(`Failed to load image: ${response.status}`);
+    throw new Error(`Failed to load OCR file: ${response.status}`);
   }
   const blob = await response.blob();
   return URL.createObjectURL(blob);
@@ -91,7 +91,8 @@ export interface OcrJob {
   downtimeCostCents?: number;
   rejectsCostCents?: number;
   error?: string;
-  hasOriginalPng?: boolean;
+  hasPdf?: boolean;
+  pdfPage?: number;
   hasMergedJson?: boolean;
   importStatus?: OcrImportStatus;
   importedAt?: string;
@@ -103,6 +104,7 @@ export interface OcrUploadMeta {
   id: string;
   pageCount: number;
   originalFilename: string;
+  deduplicated?: boolean;
 }
 
 export interface OcrFormSpec {
@@ -153,6 +155,7 @@ export const ocrApi = {
 
   startJobs: (payload: {
     uploadId: string;
+    requestId: string;
     pages: number[];
     convertMode: string;
     extractionMode: string;

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from django.conf import settings
-from django.http import FileResponse, HttpResponse
+from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.renderers import JSONRenderer
@@ -12,12 +12,14 @@ from rest_framework.views import APIView
 
 from ocr.models import OcrJobRecord
 from ocr.pipeline import jobs as job_pipeline
-from ocr.pipeline.uploads import create_upload, delete_upload, read_upload_meta, thumb_path
+from ocr.pipeline.uploads import create_upload, delete_upload
 from production.ocr_import_service import import_merged_data
 
 
 class ManagerOnlyMixin:
-    def permission_denied(self, request):
+    def permission_denied(self, request, message=None, code=None):
+        if message is not None or code is not None:
+            return super().permission_denied(request, message=message, code=code)
         user = request.user
         if not user or not user.is_authenticated:
             return Response({'detail': 'Authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
@@ -34,6 +36,8 @@ def _job_payload(meta: dict) -> dict:
     payload['importedAt'] = record.last_imported_at.isoformat() if record and record.last_imported_at else None
     payload['lastImportRejects'] = record.last_import_rejects if record else False
     payload['lastImportDowntime'] = record.last_import_downtime if record else False
+    payload['hasPdf'] = bool(meta.get('has_pdf') or meta.get('source_key') or meta.get('original_filename'))
+    payload['pdfPage'] = int(meta.get('pdf_page') or (meta.get('page') if meta.get('source_key') else 1) or 1)
     return payload
 
 
@@ -86,10 +90,9 @@ class OcrJobDetailView(ManagerOnlyMixin, APIView):
         if denied:
             return denied
         try:
-            meta = job_pipeline.read_meta(job_pipeline.get_job_dir(job_id))
+            meta = job_pipeline.get_job_meta(job_id)
         except FileNotFoundError:
             return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
-        meta['id'] = job_pipeline.get_job_dir(job_id).name
         return Response(_job_payload(meta))
 
     def delete(self, request, job_id):
@@ -110,6 +113,7 @@ class OcrJobStartView(ManagerOnlyMixin, APIView):
             return denied
         body = request.data
         upload_id = body.get('uploadId') or body.get('upload_id')
+        request_id = body.get('requestId') or body.get('request_id')
         pages = body.get('pages') or []
         convert_mode = body.get('convertMode') or body.get('convert_mode')
         extraction_mode = body.get('extractionMode') or body.get('extraction_mode')
@@ -117,6 +121,7 @@ class OcrJobStartView(ManagerOnlyMixin, APIView):
             started = job_pipeline.start_jobs_from_upload(
                 upload_id,
                 pages,
+                request_id=request_id,
                 convert_mode=convert_mode or job_pipeline.DEFAULT_CONVERT_MODE,
                 extraction_mode=extraction_mode or job_pipeline.DEFAULT_EXTRACTION_MODE,
             )
@@ -157,32 +162,18 @@ class OcrUploadView(ManagerOnlyMixin, APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class OcrUploadPageView(ManagerOnlyMixin, APIView):
-    def get(self, request, upload_id, page):
+class OcrJobPdfView(ManagerOnlyMixin, APIView):
+    def get(self, request, job_id):
         denied = self.permission_denied(request)
         if denied:
             return denied
         try:
-            path = thumb_path(upload_id, int(page))
+            pdf, _ = job_pipeline.read_job_pdf(job_id)
         except FileNotFoundError:
-            return Response({'detail': 'Page not found.'}, status=status.HTTP_404_NOT_FOUND)
-        return FileResponse(path.open('rb'), content_type='image/png')
-
-
-class OcrJobImageView(ManagerOnlyMixin, APIView):
-    def get(self, request, job_id, kind):
-        denied = self.permission_denied(request)
-        if denied:
-            return denied
-        try:
-            job_dir = job_pipeline.get_job_dir(job_id)
-        except FileNotFoundError:
-            return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
-        filename = 'original.png'
-        path = job_dir / filename
-        if not path.is_file():
-            return Response({'detail': 'Image not ready.'}, status=status.HTTP_404_NOT_FOUND)
-        return FileResponse(path.open('rb'), content_type='image/png')
+            return Response({'detail': 'PDF not available.'}, status=status.HTTP_404_NOT_FOUND)
+        response = HttpResponse(pdf, content_type='application/pdf')
+        response['Content-Disposition'] = 'inline; filename="scan.pdf"'
+        return response
 
 
 class OcrMergedJsonView(ManagerOnlyMixin, APIView):

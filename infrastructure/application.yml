@@ -1,0 +1,703 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Nissan OEE web application - private S3 frontend and a single-instance Elastic Beanstalk backend behind CloudFront
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: CloudFront -> private frontend S3 + one public t3.small Beanstalk instance -> existing private RDS; OCR artifacts stay in separate S3 stack
+    must:
+      - Keep backend at one instance and one Gunicorn process until queue ownership moves outside process memory
+      - Backend HTTP accepts only the CloudFront origin-facing managed prefix list
+      - RDS accepts MySQL only from the dedicated backend instance security group
+      - Secret values enter only through Elastic Beanstalk environment secret references
+    ref:
+      - at: AWS_DEPLOYMENT.md
+        has: deployment order, inputs, database preparation, and smoke tests
+        scope: repository
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues: [prod, staging]
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC containing the existing RDS instance
+  InstanceSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for the single Beanstalk instance and direct internet egress
+  CloudFrontOriginPrefixListId:
+    Type: String
+    AllowedPattern: '^pl-[0-9a-f]+$'
+    Description: AWS-managed com.amazonaws.global.cloudfront.origin-facing prefix list ID
+  ExistingRdsSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group attached to the existing private RDS instance
+  DatabaseHost:
+    Type: String
+    MinLength: 1
+    Description: Existing RDS endpoint hostname
+  DatabaseName:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9_]+$'
+    Description: Dedicated Nissan OEE database/schema
+  DatabaseUser:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9_]+$'
+    Description: Dedicated least-privilege Nissan OEE database user
+  OcrBucketName:
+    Type: String
+    MinLength: 3
+    Description: Bucket output from the OCR storage stack
+  OcrPrefix:
+    Type: String
+    Default: prod/ocr
+    AllowedPattern: '^[A-Za-z0-9!_.*()/-]+$'
+  DatalabApiKeySecretArn:
+    Type: String
+    AllowedPattern: '^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$'
+    Description: ARN of a secret whose entire value is the Datalab API key
+  BootstrapDatabase:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Temporarily inject the existing RDS admin SecureString for first-deploy schema and user creation
+  DatabaseAdminPasswordParameterArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:[^:]+:ssm:[^:]+:[0-9]{12}:parameter/.+$'
+    Description: Existing RDS admin SSM SecureString ARN; required only when BootstrapDatabase is true
+  ElasticBeanstalkPlatformArn:
+    Type: String
+    AllowedPattern: '^arn:[^:]+:elasticbeanstalk:[^:]+::platform/.+$'
+    Description: Current supported Python on AL2023 platform ARN
+  BackendBundleBucket:
+    Type: String
+    MinLength: 3
+    Description: S3 bucket containing the backend Elastic Beanstalk bundle
+  BackendBundleKey:
+    Type: String
+    MinLength: 1
+    Description: S3 key of backend.zip
+  BackendVersionLabel:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9._-]+$'
+    Description: Unique immutable application version label, such as a Git commit SHA
+
+Conditions:
+  DoDatabaseBootstrap: !Equals [!Ref BootstrapDatabase, 'true']
+
+Resources:
+  DjangoSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: generated Django signing secret; AWS-managed encryption avoids a paid customer-managed KMS key
+        must:
+          - Never expose the generated value through outputs or logs
+        mutable: must-never-change
+        trust: { src: authored, conf: high }
+    Properties:
+      Description: Nissan OEE production Django signing secret
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+
+  DatabasePasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: generated password for the dedicated Nissan OEE RDS user; separate from the shared RDS admin credential
+        must:
+          - Never expose the generated value through outputs or logs
+        mutable: must-never-change
+        trust: { src: authored, conf: high }
+    Properties:
+      Description: Nissan OEE production database application password
+      GenerateSecretString:
+        PasswordLength: 40
+        ExcludePunctuation: true
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: private immutable origin for Vite build output; CloudFront OAC is the only reader
+        must:
+          - Block all public access
+          - Retain release history on stack deletion or replacement
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteFrontendUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: BoundOldFrontendVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 14
+              NewerNoncurrentVersions: 3
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: signs CloudFront requests to the private frontend bucket without legacy origin access identities
+        must:
+          - Always sign S3 origin requests
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-frontend-oac'
+        Description: Private Nissan OEE frontend origin access
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  BackendInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: allows CloudFront to reach the public single instance while providing a least-privilege source for RDS ingress
+        must:
+          - Web ingress only from the AWS-managed CloudFront origin-facing prefix list
+          - Never expose MySQL or instance ports to CIDR ingress
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      GroupDescription: CloudFront-only HTTP ingress for Nissan OEE Beanstalk instance
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontOriginPrefixListId
+
+  ExistingRdsIngressFromBackend:
+    Type: AWS::EC2::SecurityGroupIngress
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: reuses the existing RDS instance without sharing the other application's database credentials or network identity
+        must:
+          - TCP 3306 source is only BackendInstanceSecurityGroup
+          - Do not modify or remove the existing application's separate ingress rule
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      GroupId: !Ref ExistingRdsSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref BackendInstanceSecurityGroup
+      Description: Nissan OEE backend access to dedicated schema
+
+  BackendInstanceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: runtime identity for one Beanstalk EC2 instance; grants only OCR prefix and named application secrets
+        must:
+          - No static AWS credentials on the instance
+          - S3 object access stays under OcrPrefix
+          - Runtime secret access stays scoped to the three application secret ARNs
+          - Existing RDS admin access exists only while DoDatabaseBootstrap is true
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AWSElasticBeanstalkWebTier'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Policies:
+        - PolicyName: NissanOeeRuntime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListOcrPrefix
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${OcrBucketName}'
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Ref OcrPrefix
+                      - !Sub '${OcrPrefix}/*'
+              - Sid: ManageOcrObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${OcrBucketName}/${OcrPrefix}/*'
+              - Sid: ReadApplicationSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Ref DjangoSecret
+                  - !Ref DatabasePasswordSecret
+                  - !Ref DatalabApiKeySecretArn
+                Condition:
+                  Bool:
+                    aws:SecureTransport: 'true'
+              - !If
+                - DoDatabaseBootstrap
+                - Sid: ReadDatabaseAdminBootstrapParameter
+                  Effect: Allow
+                  Action:
+                    - ssm:GetParameter
+                  Resource: !Ref DatabaseAdminPasswordParameterArn
+                - !Ref AWS::NoValue
+              - !If
+                - DoDatabaseBootstrap
+                - Sid: DecryptDatabaseAdminBootstrapParameter
+                  Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                  Resource: '*'
+                  Condition:
+                    StringEquals:
+                      kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
+                - !Ref AWS::NoValue
+
+  BackendInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref BackendInstanceRole
+
+  ElasticBeanstalkServiceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: dedicated service role for enhanced health and managed platform updates
+        must:
+          - Trust only Elastic Beanstalk
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: elasticbeanstalk.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy'
+
+  BackendApplication:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      Description: Nissan OEE Django API and OCR worker
+
+  BackendApplicationVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    Properties:
+      ApplicationName: !Ref BackendApplication
+      Description: !Sub 'Nissan OEE backend ${BackendVersionLabel}'
+      SourceBundle:
+        S3Bucket: !Ref BackendBundleBucket
+        S3Key: !Ref BackendBundleKey
+
+  BackendEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: runs Django and OCR together on one public t3.small; single-instance mode removes idle ALB and NAT costs
+        must:
+          - Single instance only
+          - One Gunicorn process; AllAtOnce deploy prevents two OCR owners during rollout
+          - Instance public IP provides outbound Datalab and deployment access; inbound HTTP remains CloudFront-only
+        mutable: change-with-constraints
+        mutability:
+          Tier: must-never-change
+        trust: { src: authored, conf: high }
+    Properties:
+      ApplicationName: !Ref BackendApplication
+      EnvironmentName: !Sub 'nissan-oee-${EnvironmentName}'
+      CNAMEPrefix: !Sub 'nissan-oee-${EnvironmentName}-${AWS::AccountId}'
+      PlatformArn: !Ref ElasticBeanstalkPlatformArn
+      Tier:
+        Name: WebServer
+        Type: Standard
+      VersionLabel: !Ref BackendApplicationVersion
+      OptionSettings:
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: InstanceType
+          Value: t3.small
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: IamInstanceProfile
+          Value: !Ref BackendInstanceProfile
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: SecurityGroups
+          Value: !Ref BackendInstanceSecurityGroup
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: DisableIMDSv1
+          Value: 'true'
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: EnvironmentType
+          Value: SingleInstance
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: ServiceRole
+          Value: !GetAtt ElasticBeanstalkServiceRole.Arn
+        - Namespace: aws:ec2:vpc
+          OptionName: VPCId
+          Value: !Ref VpcId
+        - Namespace: aws:ec2:vpc
+          OptionName: Subnets
+          Value: !Join [',', !Ref InstanceSubnetIds]
+        - Namespace: aws:ec2:vpc
+          OptionName: AssociatePublicIpAddress
+          Value: 'true'
+        - Namespace: aws:elasticbeanstalk:command
+          OptionName: DeploymentPolicy
+          Value: AllAtOnce
+        - Namespace: aws:elasticbeanstalk:healthreporting:system
+          OptionName: SystemType
+          Value: enhanced
+        - Namespace: aws:elasticbeanstalk:environment:process:default
+          OptionName: HealthCheckPath
+          Value: /health/
+        - Namespace: aws:elasticbeanstalk:environment:process:default
+          OptionName: MatcherHTTPCode
+          Value: '200'
+        - Namespace: aws:elasticbeanstalk:cloudwatch:logs
+          OptionName: StreamLogs
+          Value: 'true'
+        - Namespace: aws:elasticbeanstalk:cloudwatch:logs
+          OptionName: DeleteOnTerminate
+          Value: 'false'
+        - Namespace: aws:elasticbeanstalk:cloudwatch:logs
+          OptionName: RetentionInDays
+          Value: '30'
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: APP_ENV
+          Value: production
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: ENABLE_OCR
+          Value: 'true'
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: PORT
+          Value: '8000'
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: AWS_REGION
+          Value: !Ref AWS::Region
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: OCR_S3_BUCKET
+          Value: !Ref OcrBucketName
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: OCR_S3_PREFIX
+          Value: !Ref OcrPrefix
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: CLOUDFRONT_ORIGIN_PREFIX_LIST_ID
+          Value: !Ref CloudFrontOriginPrefixListId
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DB_ENGINE
+          Value: mysql
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DB_HOST
+          Value: !Ref DatabaseHost
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DB_PORT
+          Value: '3306'
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DB_NAME
+          Value: !Ref DatabaseName
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DB_USER
+          Value: !Ref DatabaseUser
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DB_SSL_CA
+          Value: /etc/pki/rds/global-bundle.pem
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DB_CONN_HEALTH_CHECKS
+          Value: 'true'
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DJANGO_DEBUG
+          Value: 'false'
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DJANGO_ALLOWED_HOSTS
+          Value: '.elasticbeanstalk.com'
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DJANGO_SECURE_SSL_REDIRECT
+          Value: 'false'
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: PYTHONUNBUFFERED
+          Value: '1'
+        - Namespace: aws:elasticbeanstalk:application:environmentsecrets
+          OptionName: DJANGO_SECRET_KEY
+          Value: !Ref DjangoSecret
+        - Namespace: aws:elasticbeanstalk:application:environmentsecrets
+          OptionName: DB_PASSWORD
+          Value: !Ref DatabasePasswordSecret
+        - Namespace: aws:elasticbeanstalk:application:environmentsecrets
+          OptionName: DATALAB_API_KEY
+          Value: !Ref DatalabApiKeySecretArn
+        - !If
+          - DoDatabaseBootstrap
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: DB_ADMIN_USER
+            Value: admin
+          - !Ref AWS::NoValue
+        - !If
+          - DoDatabaseBootstrap
+          - Namespace: aws:elasticbeanstalk:application:environmentsecrets
+            OptionName: DB_ADMIN_PASSWORD
+            Value: !Ref DatabaseAdminPasswordParameterArn
+          - !Ref AWS::NoValue
+
+  BackendCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-backend-disabled'
+        Comment: Never cache authenticated Django API responses
+        DefaultTTL: 0
+        MaxTTL: 0
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          EnableAcceptEncodingBrotli: false
+          EnableAcceptEncodingGzip: false
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  BackendOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub '${AWS::StackName}-backend-forwarding'
+        Comment: Forward API auth, content negotiation, cookies, and query strings but not viewer Host
+        CookiesConfig:
+          CookieBehavior: all
+        HeadersConfig:
+          HeaderBehavior: allExcept
+          Headers:
+            - Host
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  SecurityHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: applies browser security headers at the HTTPS edge even though the staging backend origin is HTTP inside AWS
+        must:
+          - Keep HSTS preload disabled until a controlled custom domain is in use
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AWS::StackName}-security-headers'
+        Comment: Browser security headers for Nissan OEE staging
+        SecurityHeadersConfig:
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: same-origin
+            Override: true
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: false
+            Preload: false
+            Override: true
+
+  SpaRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: rewrites extensionless frontend routes to index.html without converting backend API 404 responses into SPA HTML
+        must:
+          - Associate only with the default frontend behavior
+          - Never rewrite requests that contain a file extension
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      Name: !Sub '${AWS::StackName}-spa-rewrite'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Rewrite Vite SPA routes to index.html
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri;
+          if (uri.endsWith('/')) {
+            request.uri = uri + 'index.html';
+          } else if (!uri.split('/').pop().includes('.')) {
+            request.uri = '/index.html';
+          }
+          return request;
+        }
+
+  WebDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: BackendEnvironment
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: one HTTPS staging URL serves the SPA and proxies API calls, avoiding mixed content and cross-origin configuration
+        must:
+          - S3 origin uses OAC and remains private
+          - API behavior disables caching and forwards Authorization
+          - Viewer HTTP redirects to HTTPS
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      DistributionConfig:
+        Comment: Nissan OEE frontend and API staging distribution
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: FrontendS3
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - Id: BackendBeanstalk
+            DomainName: !Sub 'nissan-oee-${EnvironmentName}-${AWS::AccountId}.${AWS::Region}.elasticbeanstalk.com'
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+          ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt SpaRewriteFunction.FunctionARN
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CacheBehaviors:
+          - PathPattern: '/api/*'
+            TargetOriginId: BackendBeanstalk
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref BackendCachePolicy
+            OriginRequestPolicyId: !Ref BackendOriginRequestPolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+          - PathPattern: '/health/'
+            TargetOriginId: BackendBeanstalk
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref BackendCachePolicy
+            OriginRequestPolicyId: !Ref BackendOriginRequestPolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+        PriceClass: PriceClass_200
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+          MinimumProtocolVersion: TLSv1.2_2021
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: grants read only to this CloudFront distribution and rejects non-TLS access
+        must:
+          - Scope CloudFront read by distribution source ARN
+          - Keep aws:SecureTransport deny
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${WebDistribution}'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt FrontendBucket.Arn
+              - !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+Outputs:
+  FrontendBucketName:
+    Description: Upload the built Vite files to this private bucket
+    Value: !Ref FrontendBucket
+  CloudFrontDistributionId:
+    Description: Distribution ID used for release invalidations
+    Value: !Ref WebDistribution
+  StagingUrl:
+    Description: HTTPS staging URL serving both frontend and API
+    Value: !Sub 'https://${WebDistribution.DomainName}'
+  BackendEnvironmentName:
+    Description: Elastic Beanstalk environment name
+    Value: !Ref BackendEnvironment
+  BackendEndpoint:
+    Description: CloudFront-only single-instance backend origin endpoint
+    Value: !Sub 'nissan-oee-${EnvironmentName}-${AWS::AccountId}.${AWS::Region}.elasticbeanstalk.com'
+  BackendInstanceSecurityGroupId:
+    Description: Source security group authorized on the existing RDS security group
+    Value: !Ref BackendInstanceSecurityGroup
+  DjangoSecretArn:
+    Description: ARN injected into the backend as the Django signing secret
+    Value: !Ref DjangoSecret
+  DatabasePasswordSecretArn:
+    Description: ARN injected into the backend as the dedicated database user password
+    Value: !Ref DatabasePasswordSecret

@@ -1,126 +1,361 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import type { Machine, ProductionRecord, OEEMetrics, Part, PartProductionHistory } from '@/types';
+import type { Machine, ProductionRecord, OEEMetrics, Part, PartProductionHistory, DowntimeEventHistory } from '@/types';
 import { calculateOEEMetrics } from '@/utils/oee';
 import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
-import { TrendingUp, Activity, CheckCircle2, AlertCircle, AlertTriangle, XCircle, Clock } from 'lucide-react';
-import { format, subDays, startOfDay } from 'date-fns';
+import { TrendingUp, Activity, CheckCircle2, AlertCircle, AlertTriangle, XCircle, Clock, ChevronDown, ChevronUp } from 'lucide-react';
+import { eachDayOfInterval, format, parseISO, subDays } from 'date-fns';
 
 interface DashboardProps {
   machines: Machine[];
   productionRecords: ProductionRecord[];
   parts: Part[];
   partProductionHistory: PartProductionHistory[];
+  downtimeEventHistory: DowntimeEventHistory[];
+  availableDateRange: { min: string; max: string };
+  onRequestDateRange: (start: string, end: string) => void | Promise<void>;
 }
 
-export function Dashboard({ machines, productionRecords, parts, partProductionHistory }: DashboardProps) {
-  const calculateOEE = (record: ProductionRecord, machine: Machine): OEEMetrics =>
-    calculateOEEMetrics(record, machine, parts, partProductionHistory);
+const dateInputClassName = 'h-9 rounded-md border border-slate-300 bg-white px-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200';
 
-  const overallMetrics = useMemo(() => {
-    if (productionRecords.length === 0) {
-      return { availability: 0, performance: 0, quality: 0, oee: 0 };
-    }
+interface DateRangeValue {
+  start: string;
+  end: string;
+}
 
-    const metricsArray = productionRecords.map(record => {
-      const machine = machines.find(m => m.id === record.machineId);
-      return machine ? calculateOEE(record, machine) : null;
-    }).filter(Boolean) as OEEMetrics[];
+function DateRangeSelector({
+  value,
+  onChange,
+  min,
+  max,
+  label,
+}: {
+  value: DateRangeValue;
+  onChange: (value: DateRangeValue) => void;
+  min?: string;
+  max: string;
+  label: string;
+}) {
+  return (
+    <div className="flex flex-wrap items-end gap-2">
+      <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+        From
+        <input
+          aria-label={`${label} start date`}
+          type="date"
+          value={value.start}
+          min={min}
+          max={value.end}
+          onChange={event => {
+            const start = event.target.value;
+            if (!start) return;
+            onChange({ start, end: start > value.end ? start : value.end });
+          }}
+          className={dateInputClassName}
+        />
+      </label>
+      <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+        To
+        <input
+          aria-label={`${label} end date`}
+          type="date"
+          value={value.end}
+          min={value.start}
+          max={max}
+          onChange={event => {
+            const end = event.target.value;
+            if (!end) return;
+            onChange({ start: end < value.start ? end : value.start, end });
+          }}
+          className={dateInputClassName}
+        />
+      </label>
+    </div>
+  );
+}
 
-    if (metricsArray.length === 0) {
-      return { availability: 0, performance: 0, quality: 0, oee: 0 };
-    }
+function SingleDateSelector({
+  value,
+  onChange,
+  min,
+  max,
+  label,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  min?: string;
+  max: string;
+  label: string;
+}) {
+  return (
+    <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+      Date
+      <input
+        aria-label={label}
+        type="date"
+        value={value}
+        min={min}
+        max={max}
+        onChange={event => {
+          if (event.target.value) onChange(event.target.value);
+        }}
+        className={dateInputClassName}
+      />
+    </label>
+  );
+}
 
-    const avg = metricsArray.reduce((acc, metrics) => ({
-      availability: acc.availability + metrics.availability,
-      performance: acc.performance + metrics.performance,
-      quality: acc.quality + metrics.quality,
-      oee: acc.oee + metrics.oee,
-    }), { availability: 0, performance: 0, quality: 0, oee: 0 });
+function CollapsibleChartCard({
+  title,
+  description,
+  controls,
+  children,
+}: {
+  title: string;
+  description: string;
+  controls?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(true);
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <Card>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <CardTitle>{title}</CardTitle>
+            <CardDescription>{description}</CardDescription>
+          </div>
+          <div className="flex flex-wrap items-end justify-end gap-2">
+            {controls}
+            <CollapsibleTrigger asChild>
+              <button
+                type="button"
+                aria-label={`${open ? 'Collapse' : 'Expand'} ${title}`}
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-200"
+              >
+                {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </button>
+            </CollapsibleTrigger>
+          </div>
+        </CardHeader>
+        <CollapsibleContent>
+          <CardContent>{children}</CardContent>
+        </CollapsibleContent>
+      </Card>
+    </Collapsible>
+  );
+}
+
+function buildParetoData(items: Array<{ name: string; value: number }>, categoryLimit = 10) {
+  const totals = new Map<string, number>();
+  items.forEach(item => totals.set(item.name, (totals.get(item.name) || 0) + item.value));
+
+  const sorted = [...totals.entries()]
+    .map(([name, value]) => ({ name, value }))
+    .sort((a, b) => b.value - a.value);
+  const displayed = sorted.length > categoryLimit
+    ? [
+        ...sorted.slice(0, categoryLimit - 1),
+        {
+          name: 'Other',
+          value: sorted.slice(categoryLimit - 1).reduce((sum, item) => sum + item.value, 0),
+        },
+      ]
+    : sorted;
+
+  return displayed;
+}
+
+function downtimeParetoLabel(reason: DowntimeEventHistory['reason'] | undefined) {
+  const fullLabel = reason?.fullPath || reason?.category || 'Unspecified';
+  const pathSegments = fullLabel
+    .split(/\s*(?:>|→)\s*/)
+    .map(segment => segment.trim())
+    .filter(Boolean);
+
+  return pathSegments[pathSegments.length - 1] || 'Unspecified';
+}
+
+function averageMetrics(
+  records: ProductionRecord[],
+  machines: Machine[],
+  parts: Part[],
+  partProductionHistory: PartProductionHistory[],
+): OEEMetrics {
+  const metrics = records.map(record => {
+    const machine = machines.find(item => item.id === record.machineId);
+    return machine ? calculateOEEMetrics(record, machine, parts, partProductionHistory) : null;
+  }).filter(Boolean) as OEEMetrics[];
+
+  if (metrics.length === 0) {
+    return { availability: 0, performance: 0, quality: 0, oee: 0 };
+  }
+
+  const totals = metrics.reduce((acc, item) => ({
+    availability: acc.availability + item.availability,
+    performance: acc.performance + item.performance,
+    quality: acc.quality + item.quality,
+    oee: acc.oee + item.oee,
+  }), { availability: 0, performance: 0, quality: 0, oee: 0 });
+
+  return {
+    availability: totals.availability / metrics.length,
+    performance: totals.performance / metrics.length,
+    quality: totals.quality / metrics.length,
+    oee: totals.oee / metrics.length,
+  };
+}
+
+function metricsByMachine(
+  machines: Machine[],
+  records: ProductionRecord[],
+  parts: Part[],
+  partProductionHistory: PartProductionHistory[],
+) {
+  return machines.map(machine => {
+    const machineRecords = records.filter(record => record.machineId === machine.id);
+    const averages = averageMetrics(machineRecords, [machine], parts, partProductionHistory);
 
     return {
-      availability: avg.availability / metricsArray.length,
-      performance: avg.performance / metricsArray.length,
-      quality: avg.quality / metricsArray.length,
-      oee: avg.oee / metricsArray.length,
+      id: machine.id,
+      name: machine.name,
+      ...averages,
+      recordCount: machineRecords.length,
     };
-  }, [productionRecords, machines, parts, partProductionHistory]);
+  });
+}
 
-  const machinePerformance = useMemo(() => {
-    return machines.map(machine => {
-      const machineRecords = productionRecords.filter(r => r.machineId === machine.id);
-      if (machineRecords.length === 0) {
-        return {
-          id: machine.id,
-          name: machine.name,
-          oee: 0,
-          availability: 0,
-          performance: 0,
-          quality: 0,
-          recordCount: 0,
-        };
-      }
+export function Dashboard({
+  machines,
+  productionRecords,
+  parts,
+  partProductionHistory,
+  downtimeEventHistory,
+  availableDateRange,
+  onRequestDateRange,
+}: DashboardProps) {
+  const today = format(new Date(), 'yyyy-MM-dd');
+  const dateInputMax = availableDateRange.max > today ? availableDateRange.max : today;
+  const defaultRange = { start: format(subDays(new Date(), 6), 'yyyy-MM-dd'), end: today };
+  const [trendRange, setTrendRange] = useState<DateRangeValue>(defaultRange);
+  const [downtimeRange, setDowntimeRange] = useState<DateRangeValue>(defaultRange);
+  const [defectRange, setDefectRange] = useState<DateRangeValue>(defaultRange);
+  const [componentTrendRange, setComponentTrendRange] = useState<DateRangeValue>(defaultRange);
+  const [machineDate, setMachineDate] = useState(today);
+  const [componentsDate, setComponentsDate] = useState(today);
+  const [shiftDate, setShiftDate] = useState(today);
 
-      const metricsArray = machineRecords.map(record => calculateOEE(record, machine));
-      const avg = metricsArray.reduce((acc, m) => ({
-        availability: acc.availability + m.availability,
-        performance: acc.performance + m.performance,
-        quality: acc.quality + m.quality,
-        oee: acc.oee + m.oee,
-      }), { availability: 0, performance: 0, quality: 0, oee: 0 });
+  const todayRecords = useMemo(
+    () => productionRecords.filter(record => record.date === today),
+    [productionRecords, today],
+  );
+  const machineDateRecords = useMemo(
+    () => productionRecords.filter(record => record.date === machineDate),
+    [productionRecords, machineDate],
+  );
+  const componentsDateRecords = useMemo(
+    () => productionRecords.filter(record => record.date === componentsDate),
+    [productionRecords, componentsDate],
+  );
+  const shiftDateRecords = useMemo(
+    () => productionRecords.filter(record => record.date === shiftDate),
+    [productionRecords, shiftDate],
+  );
 
-      const count = metricsArray.length;
-      return {
-        id: machine.id,
-        name: machine.name,
-        oee: avg.oee / count,
-        availability: avg.availability / count,
-        performance: avg.performance / count,
-        quality: avg.quality / count,
-        recordCount: count,
-      };
-    });
-  }, [machines, productionRecords, parts, partProductionHistory]);
+  const overallMetrics = useMemo(
+    () => averageMetrics(todayRecords, machines, parts, partProductionHistory),
+    [todayRecords, machines, parts, partProductionHistory],
+  );
+  const componentMetrics = useMemo(
+    () => averageMetrics(componentsDateRecords, machines, parts, partProductionHistory),
+    [componentsDateRecords, machines, parts, partProductionHistory],
+  );
+  const machinePerformance = useMemo(
+    () => metricsByMachine(machines, machineDateRecords, parts, partProductionHistory),
+    [machines, machineDateRecords, parts, partProductionHistory],
+  );
+  const todayMachinePerformance = useMemo(
+    () => metricsByMachine(machines, todayRecords, parts, partProductionHistory),
+    [machines, todayRecords, parts, partProductionHistory],
+  );
 
   const dailyTrend = useMemo(() => {
-    const last7Days = Array.from({ length: 7 }, (_, i) => {
-      const date = startOfDay(subDays(new Date(), 6 - i));
-      return format(date, 'yyyy-MM-dd');
-    });
+    const rangeDates = eachDayOfInterval({
+      start: parseISO(trendRange.start),
+      end: parseISO(trendRange.end),
+    }).map(date => format(date, 'yyyy-MM-dd'));
 
-    return last7Days.map((date, index) => {
+    return rangeDates.map((date, index) => {
       const dayRecords = productionRecords.filter(r => r.date === date);
       if (dayRecords.length === 0) {
-        return { id: `day-${index}`, date: format(new Date(date), 'MMM dd'), oee: 0, records: 0 };
+        return { id: `day-${index}`, date: format(parseISO(date), 'MMM dd'), oee: 0, records: 0 };
       }
 
-      const metricsArray = dayRecords.map(record => {
-        const machine = machines.find(m => m.id === record.machineId);
-        return machine ? calculateOEE(record, machine) : null;
-      }).filter(Boolean) as OEEMetrics[];
-
-      const avgOEE = metricsArray.reduce((sum, m) => sum + m.oee, 0) / metricsArray.length;
+      const avgOEE = averageMetrics(dayRecords, machines, parts, partProductionHistory).oee;
 
       return {
         id: `day-${index}`,
-        date: format(new Date(date), 'MMM dd'),
+        date: format(parseISO(date), 'MMM dd'),
         oee: avgOEE,
         records: dayRecords.length,
       };
     });
-  }, [productionRecords, machines, parts, partProductionHistory]);
+  }, [trendRange, productionRecords, machines, parts, partProductionHistory]);
+
+  const downtimePareto = useMemo(() => buildParetoData(
+    downtimeEventHistory
+      .filter(event => event.date >= downtimeRange.start && event.date <= downtimeRange.end)
+      .map(event => ({
+        name: downtimeParetoLabel(event.reason),
+        value: event.duration,
+      })),
+  ), [downtimeEventHistory, downtimeRange]);
+
+  const defectPareto = useMemo(() => buildParetoData(
+    partProductionHistory
+      .filter(record => (
+        record.date >= defectRange.start
+        && record.date <= defectRange.end
+        && record.result === 'NOT GOOD'
+      ))
+      .map(record => ({
+        name: record.defectSpecificReason
+          || record.defectSubcategory
+          || record.defectCategory
+          || 'Unspecified',
+        value: 1,
+      })),
+  ), [partProductionHistory, defectRange]);
+
+  const componentTrend = useMemo(() => {
+    const rangeDates = eachDayOfInterval({
+      start: parseISO(componentTrendRange.start),
+      end: parseISO(componentTrendRange.end),
+    });
+
+    return rangeDates.map(date => {
+      const dateKey = format(date, 'yyyy-MM-dd');
+      const records = productionRecords.filter(record => record.date === dateKey);
+      return {
+        date: format(date, 'MMM dd'),
+        ...averageMetrics(records, machines, parts, partProductionHistory),
+      };
+    });
+  }, [componentTrendRange, productionRecords, machines, parts, partProductionHistory]);
 
   const shiftDistribution = useMemo(() => {
     const shifts = { morning: 0, afternoon: 0, night: 0 };
-    productionRecords.forEach(record => {
+    shiftDateRecords.forEach(record => {
       shifts[record.shift]++;
     });
 
@@ -129,7 +364,7 @@ export function Dashboard({ machines, productionRecords, parts, partProductionHi
       { id: 'shift-afternoon', name: 'Afternoon', value: shifts.afternoon },
       { id: 'shift-night', name: 'Night', value: shifts.night },
     ];
-  }, [productionRecords]);
+  }, [shiftDateRecords]);
 
   const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444'];
 
@@ -161,7 +396,7 @@ export function Dashboard({ machines, productionRecords, parts, partProductionHi
       });
     }
 
-    const recentRecords = productionRecords.slice(0, 20);
+    const recentRecords = todayRecords.slice(0, 20);
     const highDowntimeRecords = recentRecords.filter(r => r.downtime > 120);
     if (highDowntimeRecords.length > 0) {
       const uniqueMachines = [...new Set(highDowntimeRecords.map(r => r.machineName))];
@@ -172,7 +407,7 @@ export function Dashboard({ machines, productionRecords, parts, partProductionHi
       });
     }
 
-    const lowOEEMachines = machinePerformance.filter(m => m.oee < 60 && m.recordCount > 0);
+    const lowOEEMachines = todayMachinePerformance.filter(m => m.oee < 60 && m.recordCount > 0);
     if (lowOEEMachines.length > 0) {
       alertList.push({
         type: 'warning',
@@ -190,7 +425,12 @@ export function Dashboard({ machines, productionRecords, parts, partProductionHi
     }
 
     return alertList;
-  }, [machines, productionRecords, machinePerformance, overallMetrics]);
+  }, [machines, todayRecords, todayMachinePerformance, overallMetrics]);
+
+  const todayLabel = format(parseISO(today), 'MMM dd, yyyy');
+  const machineDateLabel = format(parseISO(machineDate), 'MMM dd, yyyy');
+  const componentsDateLabel = format(parseISO(componentsDate), 'MMM dd, yyyy');
+  const shiftDateLabel = format(parseISO(shiftDate), 'MMM dd, yyyy');
 
   return (
     <div className="space-y-6 w-full">
@@ -231,7 +471,7 @@ export function Dashboard({ machines, productionRecords, parts, partProductionHi
               {overallMetrics.oee.toFixed(1)}%
             </div>
             <p className="text-xs text-slate-600 mt-1">
-              {productionRecords.length} total records
+              {todayRecords.length} record(s) today
             </p>
           </CardContent>
         </Card>
@@ -283,116 +523,243 @@ export function Dashboard({ machines, productionRecords, parts, partProductionHi
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>OEE Trend (Last 7 Days)</CardTitle>
-            <CardDescription>Daily OEE performance tracking</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={dailyTrend}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="date" />
-                <YAxis domain={[0, 100]} />
-                <RechartsTooltip />
-                <Legend />
-                <Line
-                  key="oee-trend-line"
-                  type="monotone"
-                  dataKey="oee"
-                  stroke="#3b82f6"
-                  strokeWidth={2}
-                  name="OEE %"
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
+        <CollapsibleChartCard
+          title="OEE Trend"
+          description="Daily average OEE across the selected range"
+          controls={(
+            <DateRangeSelector
+              value={trendRange}
+              onChange={value => {
+                setTrendRange(value);
+                void onRequestDateRange(value.start, value.end);
+              }}
+              min={availableDateRange.min || undefined}
+              max={dateInputMax}
+              label="OEE trend"
+            />
+          )}
+        >
+          <ResponsiveContainer width="100%" height={300}>
+            <LineChart data={dailyTrend}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="date" />
+              <YAxis domain={[0, 100]} />
+              <RechartsTooltip />
+              <Legend />
+              <Line type="monotone" dataKey="oee" stroke="#3b82f6" strokeWidth={2} name="OEE %" />
+            </LineChart>
+          </ResponsiveContainer>
+        </CollapsibleChartCard>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Machine Performance Comparison</CardTitle>
-            <CardDescription>OEE by machine</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={machinePerformance}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" angle={-15} textAnchor="end" height={80} />
-                <YAxis domain={[0, 100]} />
-                <RechartsTooltip />
-                <Legend />
-                <Bar key="machine-oee-bar" dataKey="oee" fill="#3b82f6" name="OEE %" />
-              </BarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
+        <CollapsibleChartCard
+          title="Machine Performance Comparison"
+          description={`OEE by machine on ${machineDateLabel}`}
+          controls={(
+            <SingleDateSelector
+              value={machineDate}
+              onChange={value => {
+                setMachineDate(value);
+                void onRequestDateRange(value, value);
+              }}
+              min={availableDateRange.min || undefined}
+              max={dateInputMax}
+              label="Machine performance date"
+            />
+          )}
+        >
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart data={machinePerformance}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="name" angle={-15} textAnchor="end" height={80} />
+              <YAxis domain={[0, 100]} />
+              <RechartsTooltip />
+              <Legend />
+              <Bar dataKey="oee" fill="#3b82f6" name="OEE %" />
+            </BarChart>
+          </ResponsiveContainer>
+        </CollapsibleChartCard>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>OEE Components Breakdown</CardTitle>
-            <CardDescription>Average performance metrics</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart
-                data={[
-                  { id: 'availability', metric: 'Availability', value: overallMetrics.availability },
-                  { id: 'performance', metric: 'Performance', value: overallMetrics.performance },
-                  { id: 'quality', metric: 'Quality', value: overallMetrics.quality },
-                ]}
+        <CollapsibleChartCard
+          title="OEE Components Breakdown"
+          description={`Average metrics on ${componentsDateLabel}`}
+          controls={(
+            <SingleDateSelector
+              value={componentsDate}
+              onChange={value => {
+                setComponentsDate(value);
+                void onRequestDateRange(value, value);
+              }}
+              min={availableDateRange.min || undefined}
+              max={dateInputMax}
+              label="OEE components date"
+            />
+          )}
+        >
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart
+              data={[
+                { id: 'availability', metric: 'Availability', value: componentMetrics.availability },
+                { id: 'performance', metric: 'Performance', value: componentMetrics.performance },
+                { id: 'quality', metric: 'Quality', value: componentMetrics.quality },
+              ]}
+            >
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="metric" />
+              <YAxis domain={[0, 100]} />
+              <RechartsTooltip />
+              <Bar dataKey="value" name="Percentage">
+                <Cell key="availability" fill={COLORS[0]} />
+                <Cell key="performance" fill={COLORS[1]} />
+                <Cell key="quality" fill={COLORS[2]} />
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </CollapsibleChartCard>
+
+        <CollapsibleChartCard
+          title="Shift Distribution"
+          description={`Production records by shift on ${shiftDateLabel}`}
+          controls={(
+            <SingleDateSelector
+              value={shiftDate}
+              onChange={value => {
+                setShiftDate(value);
+                void onRequestDateRange(value, value);
+              }}
+              min={availableDateRange.min || undefined}
+              max={dateInputMax}
+              label="Shift distribution date"
+            />
+          )}
+        >
+          <ResponsiveContainer width="100%" height={300}>
+            <PieChart>
+              <Pie
+                data={shiftDistribution}
+                cx="50%"
+                cy="50%"
+                labelLine={false}
+                label={({ name, value }) => `${name}: ${value}`}
+                outerRadius={100}
+                dataKey="value"
               >
+                {shiftDistribution.map((entry, index) => (
+                  <Cell key={entry.id} fill={COLORS[index % COLORS.length]} />
+                ))}
+              </Pie>
+              <RechartsTooltip />
+            </PieChart>
+          </ResponsiveContainer>
+        </CollapsibleChartCard>
+
+        <CollapsibleChartCard
+          title="Downtime Pareto"
+          description="Downtime minutes by reason, ordered from highest to lowest"
+          controls={(
+            <DateRangeSelector
+              value={downtimeRange}
+              onChange={value => {
+                setDowntimeRange(value);
+                void onRequestDateRange(value.start, value.end);
+              }}
+              min={availableDateRange.min || undefined}
+              max={dateInputMax}
+              label="Downtime Pareto"
+            />
+          )}
+        >
+          {downtimePareto.length > 0 ? (
+            <ResponsiveContainer width="100%" height={320}>
+              <BarChart data={downtimePareto}>
                 <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="metric" />
-                <YAxis domain={[0, 100]} />
+                <XAxis dataKey="name" angle={-25} textAnchor="end" height={110} interval={0} />
+                <YAxis />
                 <RechartsTooltip />
-                <Bar key="oee-components-bar" dataKey="value" name="Percentage">
-                  <Cell key="availability" fill={COLORS[0]} />
-                  <Cell key="performance" fill={COLORS[1]} />
-                  <Cell key="quality" fill={COLORS[2]} />
-                </Bar>
+                <Legend />
+                <Bar dataKey="value" fill="#f59e0b" name="Downtime minutes" />
               </BarChart>
             </ResponsiveContainer>
-          </CardContent>
-        </Card>
+          ) : (
+            <div className="flex h-[320px] items-center justify-center text-sm text-slate-500">
+              No downtime events in the selected range.
+            </div>
+          )}
+        </CollapsibleChartCard>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Shift Distribution</CardTitle>
-            <CardDescription>Production records by shift</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <PieChart>
-                <Pie
-                  key="shift-distribution-pie"
-                  data={shiftDistribution}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={({ name, value }) => `${name}: ${value}`}
-                  outerRadius={100}
-                  dataKey="value"
-                >
-                  {shiftDistribution.map((entry) => (
-                    <Cell key={entry.id} fill={COLORS[shiftDistribution.indexOf(entry) % COLORS.length]} />
-                  ))}
-                </Pie>
+        <CollapsibleChartCard
+          title="Defect Pareto"
+          description="Rejected parts by defect reason, ordered from highest to lowest"
+          controls={(
+            <DateRangeSelector
+              value={defectRange}
+              onChange={value => {
+                setDefectRange(value);
+                void onRequestDateRange(value.start, value.end);
+              }}
+              min={availableDateRange.min || undefined}
+              max={dateInputMax}
+              label="Defect Pareto"
+            />
+          )}
+        >
+          {defectPareto.length > 0 ? (
+            <ResponsiveContainer width="100%" height={320}>
+              <BarChart data={defectPareto}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="name" angle={-25} textAnchor="end" height={110} interval={0} />
+                <YAxis allowDecimals={false} />
                 <RechartsTooltip />
-              </PieChart>
+                <Legend />
+                <Bar dataKey="value" fill="#ef4444" name="Rejected parts" />
+              </BarChart>
             </ResponsiveContainer>
-          </CardContent>
-        </Card>
+          ) : (
+            <div className="flex h-[320px] items-center justify-center text-sm text-slate-500">
+              No rejected parts in the selected range.
+            </div>
+          )}
+        </CollapsibleChartCard>
+
+        <CollapsibleChartCard
+          title="OEE Component Trend"
+          description="Availability, performance, quality, and OEE over time"
+          controls={(
+            <DateRangeSelector
+              value={componentTrendRange}
+              onChange={value => {
+                setComponentTrendRange(value);
+                void onRequestDateRange(value.start, value.end);
+              }}
+              min={availableDateRange.min || undefined}
+              max={dateInputMax}
+              label="OEE component trend"
+            />
+          )}
+        >
+          <ResponsiveContainer width="100%" height={320}>
+            <LineChart data={componentTrend}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="date" />
+              <YAxis domain={[0, 100]} />
+              <RechartsTooltip />
+              <Legend />
+              <Line type="monotone" dataKey="availability" stroke="#3b82f6" strokeWidth={2} name="Availability %" />
+              <Line type="monotone" dataKey="performance" stroke="#8b5cf6" strokeWidth={2} name="Performance %" />
+              <Line type="monotone" dataKey="quality" stroke="#10b981" strokeWidth={2} name="Quality %" />
+              <Line type="monotone" dataKey="oee" stroke="#0f172a" strokeWidth={3} name="OEE %" />
+            </LineChart>
+          </ResponsiveContainer>
+        </CollapsibleChartCard>
       </div>
 
-      {productionRecords.length === 0 && (
+      {todayRecords.length === 0 && (
         <Card className="border-dashed">
           <CardContent className="flex flex-col items-center justify-center py-12">
             <AlertCircle className="h-12 w-12 text-slate-400 mb-4" />
             <p className="text-slate-600 text-center">
-              No production data available yet.
+              No production data available for today, {todayLabel}.
               <br />
-              Start by adding production records in the Data Entry tab.
+              The summary cards remain at zero; use the chart selectors to inspect another date.
             </p>
           </CardContent>
         </Card>

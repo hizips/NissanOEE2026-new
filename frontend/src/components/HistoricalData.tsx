@@ -32,7 +32,7 @@ import {
   XCircle,
   Factory
 } from 'lucide-react';
-import { format, parseISO } from 'date-fns';
+import { format, parseISO, subDays } from 'date-fns';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -70,6 +70,8 @@ interface HistoricalDataProps {
   userRole: 'operator' | 'manager';
   onUpdatePartHistory: (id: string, updates: Partial<PartProductionHistory>) => void;
   onUpdateDowntimeEvent: (id: string, updates: Partial<DowntimeEventHistory>) => void;
+  availableDateRange: { min: string; max: string };
+  onRequestDateRange: (start: string, end: string) => void | Promise<void>;
 }
 
 export function HistoricalData({
@@ -85,7 +87,9 @@ export function HistoricalData({
   onDeleteRecord,
   onDeletePartHistory,
   onDeleteDowntimeEvent,
-  userRole
+  userRole,
+  availableDateRange,
+  onRequestDateRange,
 }: HistoricalDataProps) {
   // Filter state
   const [searchTerm, setSearchTerm] = useState('');
@@ -94,8 +98,10 @@ export function HistoricalData({
   const [filterPart, setFilterPart] = useState<string>('all');
   const [filterShift, setFilterShift] = useState<string>('all');
   const [filterResult, setFilterResult] = useState<string>('all');
-  const [filterDateFrom, setFilterDateFrom] = useState('');
-  const [filterDateTo, setFilterDateTo] = useState('');
+  const [filterDateFrom, setFilterDateFrom] = useState(() => format(subDays(new Date(), 6), 'yyyy-MM-dd'));
+  const [filterDateTo, setFilterDateTo] = useState(() => format(new Date(), 'yyyy-MM-dd'));
+  const today = format(new Date(), 'yyyy-MM-dd');
+  const dateInputMax = availableDateRange.max > today ? availableDateRange.max : today;
 
   // UI state
   const [expandedMachines, setExpandedMachines] = useState<Set<string>>(new Set());
@@ -488,17 +494,37 @@ export function HistoricalData({
               </SelectContent>
             </Select>
             <Input
+              aria-label="History start date"
               type="date"
               placeholder="Date From"
               value={filterDateFrom}
-              onChange={(e) => setFilterDateFrom(e.target.value)}
+              min={availableDateRange.min || undefined}
+              max={filterDateTo}
+              onChange={event => {
+                const value = event.target.value;
+                if (!value) return;
+                const nextEnd = value > filterDateTo ? value : filterDateTo;
+                setFilterDateFrom(value);
+                if (nextEnd !== filterDateTo) setFilterDateTo(nextEnd);
+                void onRequestDateRange(value, nextEnd);
+              }}
               className="bg-slate-200 border-slate-200" // Added grey bg
             />
             <Input
+              aria-label="History end date"
               type="date"
               placeholder="Date To"
               value={filterDateTo}
-              onChange={(e) => setFilterDateTo(e.target.value)}
+              min={filterDateFrom}
+              max={dateInputMax}
+              onChange={event => {
+                const value = event.target.value;
+                if (!value) return;
+                const nextStart = value < filterDateFrom ? value : filterDateFrom;
+                setFilterDateTo(value);
+                if (nextStart !== filterDateFrom) setFilterDateFrom(nextStart);
+                void onRequestDateRange(nextStart, value);
+              }}
               className="bg-slate-200 border-slate-200" // Added grey bg
             />
           </div>

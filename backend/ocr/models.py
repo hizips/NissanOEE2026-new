@@ -20,6 +20,7 @@ class OcrJobRecord(models.Model):
     display_name = models.CharField(max_length=300, blank=True, default='')
     ocr_status = models.CharField(max_length=20, default='queued')
     ocr_stage = models.CharField(max_length=40, blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
     import_status = models.CharField(
         max_length=20,
         choices=IMPORT_STATUS_CHOICES,

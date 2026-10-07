@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
 
 from ocr.models import OcrJobRecord
 from ocr.pipeline import jobs as job_pipeline
-from ocr.paths import JOBS_DIR
+from ocr.storage import get_store
 
 DEFAULT_SOURCE = Path('/home/vegas/capstone/ocr/surya/data/jobs')
 
 
 class Command(BaseCommand):
-    help = 'Import legacy OCR job folders (meta.json + scans) into backend/ocr/data/jobs/'
+    help = 'Import legacy OCR job folders (meta.json + scans) into the configured S3 bucket'
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -37,14 +35,12 @@ class Command(BaseCommand):
             self.stderr.write(self.style.ERROR(f'Source not found: {source}'))
             return
 
-        JOBS_DIR.mkdir(parents=True, exist_ok=True)
+        store = get_store()
         aliases_src = source / '.aliases'
-        aliases_dst = JOBS_DIR / '.aliases'
         if aliases_src.is_dir() and not options['dry_run']:
-            aliases_dst.mkdir(parents=True, exist_ok=True)
             for alias in aliases_src.iterdir():
                 if alias.is_file():
-                    shutil.copy2(alias, aliases_dst / alias.name)
+                    store.put_text(f'jobs/.aliases/{alias.name}', alias.read_text(encoding='utf-8'))
 
         copied = 0
         for child in sorted(source.iterdir()):
@@ -52,14 +48,12 @@ class Command(BaseCommand):
                 continue
             if not (child / 'meta.json').is_file():
                 continue
-            dest = JOBS_DIR / child.name
             if options['dry_run']:
                 self.stdout.write(f'would copy {child.name}')
                 copied += 1
                 continue
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(child, dest)
+            store.delete_prefix(f'jobs/{child.name}')
+            store.upload_tree(child, f'jobs/{child.name}')
             copied += 1
             self.stdout.write(f'copied {child.name}')
 
@@ -71,11 +65,12 @@ class Command(BaseCommand):
         for meta in job_pipeline.list_jobs():
             folder = meta['id']
             record, _ = OcrJobRecord.objects.get_or_create(folder_name=folder)
-            merged_path = job_pipeline.get_job_dir(folder) / 'extract_merged_clean.json'
-            if merged_path.is_file():
-                merged = json.loads(merged_path.read_text(encoding='utf-8'))
-                record.merged_hash = OcrJobRecord.hash_merged(merged)
-                record.save(update_fields=['merged_hash'])
+            try:
+                merged = job_pipeline.load_merged(folder)
+                record.merged_json_hash = OcrJobRecord.hash_merged(merged)
+                record.save(update_fields=['merged_json_hash'])
+            except FileNotFoundError:
+                pass
             synced += 1
 
         self.stdout.write(self.style.SUCCESS(f'Imported {copied} folder(s); synced {synced} job record(s)'))

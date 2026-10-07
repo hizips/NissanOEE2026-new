@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Private durable storage for Nissan OEE OCR artifacts - S3 replaces instance-local and EFS persistence
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: Django OCR backend uses S3 as system of record; compute uses disposable local scratch only
+    must:
+      - Bucket stays private and encrypted
+      - Preserve bucket data if stack is deleted or replaced
+    ref:
+      - at: AWS_DEPLOYMENT.md
+        has: OCR storage architecture and runtime configuration
+        scope: repository
+
+Parameters:
+  OcrPrefix:
+    Type: String
+    Default: prod/ocr
+    AllowedPattern: '^[A-Za-z0-9!_.*()/-]+$'
+    Description: Environment-specific root prefix for OCR objects
+
+Resources:
+  OcrArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: durable OCR uploads, scans, aliases, status, and extraction results; S3 over EFS lowers idle cost and removes shared filesystem dependency
+        must:
+          - Block all public access
+          - Keep versioning enabled for accidental overwrite and delete recovery
+          - Encrypt every object at rest
+        mutable: change-with-constraints
+        mutability:
+          BucketName: must-never-change
+        trust: { src: authored, conf: high }
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: ExpireOldNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+              NewerNoncurrentVersions: 1
+          - Id: ExpireAbandonedUploadMetadata
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${OcrPrefix}/uploads/'
+            Expiration:
+              Days: 1
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  OcrArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: rejects plaintext transport even if a future IAM policy accidentally permits it
+        must:
+          - Keep aws:SecureTransport deny for bucket and objects
+        mutable: change-with-constraints
+        trust: { src: authored, conf: high }
+    Properties:
+      Bucket: !Ref OcrArtifactsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt OcrArtifactsBucket.Arn
+              - !Sub '${OcrArtifactsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+Outputs:
+  BucketName:
+    Description: Private bucket used by the Nissan OEE OCR backend
+    Value: !Ref OcrArtifactsBucket
+  BucketArn:
+    Description: ARN used to scope the Elastic Beanstalk instance-role policy
+    Value: !GetAtt OcrArtifactsBucket.Arn
+  OcrPrefix:
+    Description: Production object prefix configured on the backend
+    Value: !Ref OcrPrefix

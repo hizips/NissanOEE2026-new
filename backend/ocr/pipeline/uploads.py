@@ -1,16 +1,18 @@
-"""Staged PDF uploads: page count, thumbnails, page extraction."""
+"""Content-addressed staged PDFs: page counting and OCR page extraction."""
 
 from __future__ import annotations
 
 import json
+import hashlib
 import re
-import secrets
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ocr.paths import UPLOADS_DIR
+from ocr.storage import get_store
 
 
 def _utc_now() -> str:
@@ -27,26 +29,6 @@ def pdf_page_count(pdf_path: Path) -> int:
         if line.lower().startswith('pages:'):
             return int(line.split(':', 1)[1].strip())
     raise RuntimeError(f'Could not read page count for {pdf_path}')
-
-
-def render_pdf_thumbs(pdf_path: Path, out_dir: Path, dpi: int = 72) -> list[Path]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for old in out_dir.glob('page-*.png'):
-        old.unlink(missing_ok=True)
-    prefix = out_dir / 'page'
-    subprocess.run(
-        ['pdftoppm', '-png', '-r', str(dpi), str(pdf_path), str(prefix)],
-        check=True,
-        capture_output=True,
-    )
-    pages = sorted(out_dir.glob('page*.png'))
-    normalized: list[Path] = []
-    for i, src in enumerate(pages, start=1):
-        dest = out_dir / f'page-{i:03d}.png'
-        if src.resolve() != dest.resolve():
-            src.replace(dest)
-        normalized.append(dest)
-    return normalized
 
 
 def extract_pdf_page(src_pdf: Path, page: int, dest_pdf: Path) -> None:
@@ -74,30 +56,37 @@ def extract_pdf_page(src_pdf: Path, page: int, dest_pdf: Path) -> None:
 
 
 def create_upload(pdf_bytes: bytes, original_filename: str) -> dict:
-    upload_id = f'upl-{secrets.token_hex(4)}'
-    while (UPLOADS_DIR / upload_id).exists():
-        upload_id = f'upl-{secrets.token_hex(4)}'
-    up_dir = UPLOADS_DIR / upload_id
-    up_dir.mkdir(parents=True)
-    pdf_path = up_dir / 'source.pdf'
-    pdf_path.write_bytes(pdf_bytes)
-
-    try:
+    store = get_store()
+    digest = hashlib.sha256(pdf_bytes).hexdigest()
+    upload_id = f'upl-{digest}'
+    source_key = f'sources/{digest}.pdf'
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='upload-', dir=UPLOADS_DIR) as temp_dir:
+        pdf_path = Path(temp_dir) / 'source.pdf'
+        pdf_path.write_bytes(pdf_bytes)
         page_count = pdf_page_count(pdf_path)
-        thumbs = render_pdf_thumbs(pdf_path, up_dir / 'thumbs', dpi=72)
-    except Exception:
-        shutil.rmtree(up_dir, ignore_errors=True)
-        raise
 
     meta = {
         'id': upload_id,
         'original_filename': original_filename,
         'page_count': page_count,
         'created_at': _utc_now(),
-        'thumb_count': len(thumbs),
+        'content_sha256': digest,
+        'source_key': source_key,
     }
-    (up_dir / 'meta.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
-    return meta
+    created_source = store.put_bytes_if_absent(
+        source_key,
+        pdf_bytes,
+        content_type='application/pdf',
+    )
+    created_upload = store.put_json_if_absent(f'uploads/{upload_id}/meta.json', meta)
+    if not created_upload:
+        stored_meta = read_upload_meta(upload_id)
+        meta = {**stored_meta, 'original_filename': original_filename}
+    return {
+        **meta,
+        'deduplicated': not created_source,
+    }
 
 
 def get_upload_dir(upload_id: str) -> Path:
@@ -105,24 +94,43 @@ def get_upload_dir(upload_id: str) -> Path:
     if not re.fullmatch(r'upl-[0-9a-f]+', safe):
         raise FileNotFoundError(upload_id)
     path = (UPLOADS_DIR / safe).resolve()
-    if path.parent != UPLOADS_DIR.resolve() or not path.is_dir():
+    if path.parent != UPLOADS_DIR.resolve():
         raise FileNotFoundError(upload_id)
+    meta = read_upload_meta(safe)
+    path.mkdir(parents=True, exist_ok=True)
+    source = path / 'source.pdf'
+    source_key = meta.get('source_key')
+    if source_key:
+        get_store().download_file(str(source_key), source)
+    else:
+        get_store().download_file(f'uploads/{safe}/source.pdf', source)
+    (path / 'meta.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
     return path
 
 
 def read_upload_meta(upload_id: str) -> dict:
-    up_dir = get_upload_dir(upload_id)
-    return json.loads((up_dir / 'meta.json').read_text(encoding='utf-8'))
-
-
-def thumb_path(upload_id: str, page: int) -> Path:
-    up_dir = get_upload_dir(upload_id)
-    path = up_dir / 'thumbs' / f'page-{page:03d}.png'
-    if not path.is_file():
-        raise FileNotFoundError(f'thumb page {page}')
-    return path
+    safe = Path(upload_id).name
+    if not re.fullmatch(r'upl-[0-9a-f]+', safe):
+        raise FileNotFoundError(upload_id)
+    try:
+        return get_store().get_json(f'uploads/{safe}/meta.json')
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        raise FileNotFoundError(upload_id) from exc
 
 
 def delete_upload(upload_id: str) -> None:
-    up_dir = get_upload_dir(upload_id)
-    shutil.rmtree(up_dir)
+    safe = Path(upload_id).name
+    if not re.fullmatch(r'upl-[0-9a-f]+', safe):
+        raise FileNotFoundError(upload_id)
+    store = get_store()
+    if not store.exists(f'uploads/{safe}/meta.json'):
+        raise FileNotFoundError(upload_id)
+    meta = read_upload_meta(safe)
+    source_key = str(meta.get('source_key') or '')
+    store.delete_prefix(f'uploads/{safe}')
+    shutil.rmtree(UPLOADS_DIR / safe, ignore_errors=True)
+    if source_key.startswith('sources/'):
+        from ocr.pipeline.jobs import _source_is_referenced
+
+        if not _source_is_referenced(source_key, store):
+            store.delete_object(source_key)

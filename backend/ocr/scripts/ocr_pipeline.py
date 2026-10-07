@@ -14,6 +14,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -86,6 +87,7 @@ def run_convert(
     cheap: bool,
     mime: str,
     mode: str = "accurate",
+    on_artifact: Callable[[Path], None] | None = None,
 ) -> dict:
     base = api_base()
     fields = convert_options(cheap=cheap, mode=mode)
@@ -93,39 +95,61 @@ def run_convert(
         fields,
         {"file": (file_path.name, file_path.read_bytes(), mime)},
     )
-    (out_dir / "10_convert_request.json").write_text(
-        json.dumps(
-            {
-                "file": str(file_path),
-                "options": fields,
-                "cheap": cheap,
-                "mode": mode,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    print(f"Convert {file_path.name} (mode={mode}, cheap={cheap})…")
-    initial = http_json("POST", f"{base}/api/v1/convert", api_key, body, ctype)
-    (out_dir / "11_convert_submit.json").write_text(
-        json.dumps(initial, indent=2), encoding="utf-8"
-    )
+    submit_path = out_dir / "11_convert_submit.json"
+    if submit_path.is_file():
+        initial = json.loads(submit_path.read_text(encoding="utf-8"))
+        print(f"Resume convert request {initial.get('request_id')}…")
+    else:
+        request_path = out_dir / "10_convert_request.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    "file": str(file_path),
+                    "options": fields,
+                    "cheap": cheap,
+                    "mode": mode,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if on_artifact:
+            on_artifact(request_path)
+        print(f"Convert {file_path.name} (mode={mode}, cheap={cheap})…")
+        initial = http_json("POST", f"{base}/api/v1/convert", api_key, body, ctype)
+        submit_path.write_text(
+            json.dumps(initial, indent=2), encoding="utf-8"
+        )
+        if on_artifact:
+            on_artifact(submit_path)
     check_url = initial.get("request_check_url")
     if not check_url:
         raise SystemExit(f"No request_check_url: {initial}")
     print(f"  request_id={initial.get('request_id')}")
     result = poll_result(check_url, api_key, label="convert")
-    (out_dir / "12_convert_result_raw.json").write_text(
+    result_path = out_dir / "12_convert_result_raw.json"
+    result_path.write_text(
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    if on_artifact:
+        on_artifact(result_path)
     if result.get("markdown"):
-        (out_dir / "convert_result.md").write_text(result["markdown"], encoding="utf-8")
+        markdown_path = out_dir / "convert_result.md"
+        markdown_path.write_text(result["markdown"], encoding="utf-8")
+        if on_artifact:
+            on_artifact(markdown_path)
     if result.get("html"):
-        (out_dir / "convert_result.html").write_text(result["html"], encoding="utf-8")
+        html_path = out_dir / "convert_result.html"
+        html_path.write_text(result["html"], encoding="utf-8")
+        if on_artifact:
+            on_artifact(html_path)
     if result.get("json") is not None:
-        (out_dir / "convert_result.json").write_text(
+        json_path = out_dir / "convert_result.json"
+        json_path.write_text(
             json.dumps(result["json"], indent=2, ensure_ascii=False), encoding="utf-8"
         )
+        if on_artifact:
+            on_artifact(json_path)
     if not result.get("success") or result.get("status") == "failed":
         raise SystemExit(f"Convert failed: {result.get('error')}")
     if not result.get("checkpoint_id"):

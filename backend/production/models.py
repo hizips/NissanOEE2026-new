@@ -5,6 +5,7 @@ class Operator(models.Model):
     employee_id = models.CharField(max_length=50, unique=True)
     role = models.CharField(max_length=50)
     active = models.BooleanField(default=True)
+    is_mock = models.BooleanField(default=False, db_index=True)
 
     def __str__(self):
         return self.name
@@ -36,6 +37,7 @@ class Machine(models.Model):
     default_shift_time = models.IntegerField(default=480) # in minutes
     status = models.CharField(max_length=20, default='idle')
     active = models.BooleanField(default=True)
+    is_mock = models.BooleanField(default=False, db_index=True)
     supported_parts = models.ManyToManyField(Part, blank=True)
     image = models.URLField(blank=True, null=True)
 
@@ -106,6 +108,7 @@ class PartProductionHistory(models.Model):
     comment = models.TextField(blank=True, null=True)
     timestamp = models.DateTimeField(auto_now_add=True)
     ocr_job_id = models.CharField(max_length=200, blank=True, default='', db_index=True)
+    is_mock = models.BooleanField(default=False, db_index=True)
 
 class DowntimeEventHistory(models.Model):
     SHIFT_CHOICES = [('morning', 'Morning'), ('afternoon', 'Afternoon'), ('night', 'Night')]
@@ -125,6 +128,7 @@ class DowntimeEventHistory(models.Model):
     comment = models.TextField(blank=True, null=True)
     timestamp = models.DateTimeField(auto_now_add=True)
     ocr_job_id = models.CharField(max_length=200, blank=True, default='', db_index=True)
+    is_mock = models.BooleanField(default=False, db_index=True)
 
 class ProductionRecord(models.Model):
     SHIFT_CHOICES = [('morning', 'Morning'), ('afternoon', 'Afternoon'), ('night', 'Night')]
@@ -150,3 +154,4 @@ class ProductionRecord(models.Model):
     downtime_events = models.JSONField(blank=True, default=list)
     defects = models.JSONField(blank=True, default=list)
     ocr_job_id = models.CharField(max_length=200, blank=True, default='', db_index=True)
+    is_mock = models.BooleanField(default=False, db_index=True)

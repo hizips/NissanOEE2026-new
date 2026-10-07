@@ -15,6 +15,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -71,6 +72,7 @@ def run_extract(
     *,
     tag: str,
     extraction_mode: str,
+    on_artifact: Callable[[Path], None] | None = None,
 ) -> dict:
     base = api_base()
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -80,41 +82,60 @@ def run_extract(
         "extraction_mode": extraction_mode,
         "output_format": "json",
     }
-    (out_dir / f"20_{tag}_extract_request.json").write_text(
-        json.dumps(
-            {
-                "checkpoint_id": checkpoint_id,
-                "extraction_mode": extraction_mode,
-                "schema_title": schema.get("title"),
-                "schema_path": str(schema_path),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
     body, ctype = multipart_encode(fields)
-    print(f"Extract [{tag}] via checkpoint {checkpoint_id[:24]}… ({extraction_mode})")
-    initial = http_json("POST", f"{base}/api/v1/extract", api_key, body, ctype)
-    (out_dir / f"21_{tag}_extract_submit.json").write_text(
-        json.dumps(initial, indent=2), encoding="utf-8"
-    )
+    submit_path = out_dir / f"21_{tag}_extract_submit.json"
+    if submit_path.is_file():
+        initial = json.loads(submit_path.read_text(encoding="utf-8"))
+        print(f"Resume extract [{tag}] request {initial.get('request_id')}…")
+    else:
+        request_path = out_dir / f"20_{tag}_extract_request.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    "checkpoint_id": checkpoint_id,
+                    "extraction_mode": extraction_mode,
+                    "schema_title": schema.get("title"),
+                    "schema_path": str(schema_path),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if on_artifact:
+            on_artifact(request_path)
+        print(f"Extract [{tag}] via checkpoint {checkpoint_id[:24]}… ({extraction_mode})")
+        initial = http_json("POST", f"{base}/api/v1/extract", api_key, body, ctype)
+        submit_path.write_text(
+            json.dumps(initial, indent=2), encoding="utf-8"
+        )
+        if on_artifact:
+            on_artifact(submit_path)
     check_url = initial.get("request_check_url")
     if not check_url:
         raise SystemExit(f"No request_check_url [{tag}]: {initial}")
     print(f"  request_id={initial.get('request_id')}")
     result = poll_result(check_url, api_key, label=f"extract-{tag}")
-    (out_dir / f"22_{tag}_extract_result_raw.json").write_text(
+    result_path = out_dir / f"22_{tag}_extract_result_raw.json"
+    result_path.write_text(
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    if on_artifact:
+        on_artifact(result_path)
     extracted = parse_extraction(result)
     if extracted is not None:
-        (out_dir / f"extract_{tag}.json").write_text(
+        extracted_path = out_dir / f"extract_{tag}.json"
+        extracted_path.write_text(
             json.dumps(extracted, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-        (out_dir / f"extract_{tag}_clean.json").write_text(
+        if on_artifact:
+            on_artifact(extracted_path)
+        clean_path = out_dir / f"extract_{tag}_clean.json"
+        clean_path.write_text(
             json.dumps(clean(extracted), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        if on_artifact:
+            on_artifact(clean_path)
     if not result.get("success") or result.get("status") == "failed":
         raise SystemExit(f"Extract [{tag}] failed: {result.get('error')}")
     return result

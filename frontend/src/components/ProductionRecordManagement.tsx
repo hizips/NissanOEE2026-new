@@ -6,20 +6,23 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { format, parseISO } from 'date-fns';
+import { format, parseISO, subDays } from 'date-fns';
 import { ChevronDown, ChevronRight, Edit3, Factory, Clock, Package, CheckCircle, XCircle, Plus, Trash2, FileImage, Loader2, X } from 'lucide-react';
 import type { ProductionRecord, PartProductionHistory, DowntimeEventHistory, Machine, Part, DefectReason } from '@/types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
-import { fetchOcrBlobUrl } from '@/services/ocrApi';
+import { fetchOcrBlobUrl, ocrApi } from '@/services/ocrApi';
+import { PdfDocumentViewer } from '@/components/ocr/PdfDocumentViewer';
 import {
   isOcrImportedRecord,
   matchesShiftRecord,
   ocrImportLabel,
   parseOcrJobIdFromRecord,
 } from '@/utils/ocrRecordUtils';
+
+const OCR_ENABLED = import.meta.env.VITE_ENABLE_OCR !== 'false';
 
 interface ProductionRecordManagementProps {
   productionRecords: ProductionRecord[];
@@ -36,6 +39,8 @@ interface ProductionRecordManagementProps {
   onAddDowntimeEvent: (event: Omit<DowntimeEventHistory, 'id' | 'timestamp'>) => void;
   onUpdateDowntimeEvent: (id: string, updates: Partial<DowntimeEventHistory>) => void;
   onDeleteDowntimeEvent: (id: string) => void;
+  availableDateRange: { min: string; max: string };
+  onRequestDateRange: (start: string, end: string) => void | Promise<void>;
 }
 
 type PartDialogMode = 'add' | 'edit';
@@ -46,8 +51,13 @@ export function ProductionRecordManagement({
   machines, parts, defectReasons,
   onUpdateRecord, onDeleteRecord, onAddPartHistory, onUpdatePartHistory, onDeletePartHistory,
   onAddDowntimeEvent, onUpdateDowntimeEvent, onDeleteDowntimeEvent,
+  availableDateRange, onRequestDateRange,
 }: ProductionRecordManagementProps) {
   const [expandedRecords, setExpandedRecords] = useState<Set<string>>(new Set());
+  const [recordStartDate, setRecordStartDate] = useState(() => format(subDays(new Date(), 2), 'yyyy-MM-dd'));
+  const [recordEndDate, setRecordEndDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
+  const today = format(new Date(), 'yyyy-MM-dd');
+  const dateInputMax = availableDateRange.max > today ? availableDateRange.max : today;
 
   // Delete confirmation
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -102,19 +112,31 @@ export function ProductionRecordManagement({
 
   const [scanPreview, setScanPreview] = useState<{ jobId: string; label: string } | null>(null);
   const [scanUrl, setScanUrl] = useState<string | null>(null);
+  const [scanPage, setScanPage] = useState(1);
   const [scanLoading, setScanLoading] = useState(false);
 
   useEffect(() => {
+    if (!OCR_ENABLED) {
+      return;
+    }
     if (!scanPreview) {
-      if (scanUrl?.startsWith('blob:')) URL.revokeObjectURL(scanUrl);
       setScanUrl(null);
+      setScanPage(1);
       return;
     }
     let cancelled = false;
     setScanLoading(true);
-    fetchOcrBlobUrl(`/jobs/${encodeURIComponent(scanPreview.jobId)}/original.png`)
-      .then((url) => {
-        if (!cancelled) setScanUrl(url);
+    Promise.all([
+      ocrApi.getJob(scanPreview.jobId),
+      fetchOcrBlobUrl(`/jobs/${encodeURIComponent(scanPreview.jobId)}/source.pdf`),
+    ])
+      .then(([job, url]) => {
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        setScanPage(job.pdfPage || 1);
+        setScanUrl(url);
       })
       .catch(() => {
         if (!cancelled) toast.error('Could not load original scan');
@@ -127,7 +149,14 @@ export function ProductionRecordManagement({
     };
   }, [scanPreview]);
 
+  useEffect(() => {
+    return () => {
+      if (scanUrl?.startsWith('blob:')) URL.revokeObjectURL(scanUrl);
+    };
+  }, [scanUrl]);
+
   const openScanPreview = (record: ProductionRecord) => {
+    if (!OCR_ENABLED) return;
     const jobId = parseOcrJobIdFromRecord(record);
     if (!jobId) {
       toast.error('No linked OCR job found for this record');
@@ -296,12 +325,15 @@ export function ProductionRecordManagement({
   // Unique defect categories / subcategories for selectors
   const defectCategories = [...new Set(defectReasons.map(r => r.category))];
   const defectSubcategories = defectReasons.filter(r => r.category === partDefectCategory).map(r => r.subcategory);
+  const filteredProductionRecords = productionRecords.filter(record => (
+    record.date >= recordStartDate && record.date <= recordEndDate
+  ));
 
   const recordsList = (
     <div className="space-y-4">
-      {productionRecords.length === 0 ? (
-        <div className="text-center py-12 bg-white border border-dashed rounded-lg"><p className="text-slate-500">No shift records found.</p></div>
-      ) : productionRecords.map(record => {
+      {filteredProductionRecords.length === 0 ? (
+        <div className="text-center py-12 bg-white border border-dashed rounded-lg"><p className="text-slate-500">No shift records found in the selected date range.</p></div>
+      ) : filteredProductionRecords.map(record => {
         const isExpanded = expandedRecords.has(record.id);
         const shiftParts = partProductionHistory.filter(p => matchesShiftRecord(record, p));
         const shiftDowntimes = downtimeEventHistory.filter(d => matchesShiftRecord(record, d));
@@ -338,7 +370,7 @@ export function ProductionRecordManagement({
                   <div className="text-center"><div className="text-slate-500">Net</div><div className="font-bold text-lg text-blue-600">{record.netProduction}</div></div>
                   <div className="text-center"><div className="text-slate-500">Defects</div><div className="font-bold text-lg text-red-600">{record.defectCount}</div></div>
                   <div className="text-center"><div className="text-slate-500">Down</div><div className="font-bold text-lg text-orange-600">{record.downtime}m</div></div>
-                  {ocrImported && ocrJobId && (
+                  {OCR_ENABLED && ocrImported && ocrJobId && (
                     <Button
                       variant="outline"
                       size="sm"
@@ -449,15 +481,53 @@ export function ProductionRecordManagement({
 
   return (
     <div className="space-y-6 w-full">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight text-slate-900">Shift Records</h2>
-        <p className="text-slate-600">View and manage full shift production records.</p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight text-slate-900">Shift Records</h2>
+          <p className="text-slate-600">View and manage full shift production records.</p>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span className="text-sm font-medium text-slate-600">Date range</span>
+          <Input
+            aria-label="Shift records start date"
+            type="date"
+            value={recordStartDate}
+            min={availableDateRange.min || undefined}
+            max={recordEndDate}
+            onChange={event => {
+              const value = event.target.value;
+              if (!value) return;
+              const nextEnd = value > recordEndDate ? value : recordEndDate;
+              setRecordStartDate(value);
+              if (nextEnd !== recordEndDate) setRecordEndDate(nextEnd);
+              void onRequestDateRange(value, nextEnd);
+            }}
+            className="h-10 w-[150px] bg-white"
+          />
+          <span className="text-sm text-slate-500">to</span>
+          <Input
+            aria-label="Shift records end date"
+            type="date"
+            value={recordEndDate}
+            min={recordStartDate}
+            max={dateInputMax}
+            onChange={event => {
+              const value = event.target.value;
+              if (!value) return;
+              const nextStart = value < recordStartDate ? value : recordStartDate;
+              setRecordEndDate(value);
+              if (nextStart !== recordStartDate) setRecordStartDate(nextStart);
+              void onRequestDateRange(nextStart, value);
+            }}
+            className="h-10 w-[150px] bg-white"
+          />
+        </div>
       </div>
 
       <div className="flex flex-col lg:flex-row items-start gap-4">
         <div className="flex-1 min-w-0">{recordsList}</div>
 
-        {scanPreview && (
+        {OCR_ENABLED && scanPreview && (
           <aside className="sticky top-4 z-10 flex w-full max-w-md shrink-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm lg:w-[min(42vw,520px)] self-start max-h-[calc(100vh-6rem)]">
             <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3 shrink-0 bg-white">
               <div className="min-w-0">
@@ -468,14 +538,19 @@ export function ProductionRecordManagement({
                 <X className="h-4 w-4" />
               </Button>
             </div>
-            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4">
+            <div className="flex-1 min-h-0 overflow-hidden p-4">
               {scanLoading ? (
                 <div className="flex items-center justify-center gap-2 text-slate-500 py-16">
                   <Loader2 className="h-5 w-5 animate-spin" />
                   Loading scan…
                 </div>
               ) : scanUrl ? (
-                <img src={scanUrl} alt="OCR original scan" className="w-full rounded border border-slate-200 bg-white" />
+                <PdfDocumentViewer
+                  src={scanUrl}
+                  page={scanPage}
+                  title={`Original scan for ${scanPreview.label}`}
+                  className="h-[calc(100vh-12rem)] min-h-[520px] w-full rounded border border-slate-200 bg-white"
+                />
               ) : (
                 <p className="text-sm text-slate-500 text-center py-16">Scan not available</p>
               )}
@@ -493,7 +568,7 @@ export function ProductionRecordManagement({
             {editingRecord && (isOcrImportedRecord(editingRecord.notes) || !!editingRecord.ocrJobId) && (
               <div className="flex flex-wrap items-center gap-2 pt-2">
                 <Badge className="bg-violet-600 text-white hover:bg-violet-600">OCR Imported</Badge>
-                {editingOcrJobId && (
+                {OCR_ENABLED && editingOcrJobId && (
                   <Button
                     type="button"
                     variant="outline"
